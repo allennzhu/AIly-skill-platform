@@ -15,6 +15,41 @@ def test_load_config_requires_api_key(monkeypatch):
         assert "API_KEY" in str(e) or "missing" in str(e).lower()
 
 
+def test_api_request_default_super_token(monkeypatch):
+    monkeypatch.setenv("PM_PLATFORM_BASE_URL", "https://pm.example.com")
+    monkeypatch.setenv("PM_PLATFORM_API_KEY", "super")
+    import api_client
+
+    body = json.dumps({"code": 0, "data": {"ok": 1}}).encode()
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = body
+    mock_resp.__enter__.return_value = mock_resp
+    mock_resp.__exit__.return_value = False
+    with patch("api_client.urlopen", return_value=mock_resp) as m:
+        api_client.api_request("GET", "/x")
+        req = m.call_args[0][0]
+        assert req.get_header("Authorization") == "Bearer super"
+
+
+def test_load_config_env_overrides_file(monkeypatch):
+    monkeypatch.setenv("PM_PLATFORM_BASE_URL", "https://env.example.com")
+    monkeypatch.setenv("PM_PLATFORM_API_KEY", "env-key")
+    import api_client
+
+    monkeypatch.setattr(
+        api_client,
+        "_load_file_config",
+        lambda: {
+            "base_url": "https://file.example.com",
+            "api_key": "file-key",
+            "auth_type": "",
+        },
+    )
+    cfg = api_client.load_config()
+    assert cfg["base_url"] == "https://env.example.com"
+    assert cfg["api_key"] == "env-key"
+
+
 def test_api_request_uses_override_token(monkeypatch):
     monkeypatch.setenv("PM_PLATFORM_BASE_URL", "https://pm.example.com")
     monkeypatch.setenv("PM_PLATFORM_API_KEY", "super")
