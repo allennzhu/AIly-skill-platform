@@ -23,16 +23,17 @@
 | `dept_id` | 否 | 部门 ID；与 `dept_name` 同时存在时以 ID 为准 |
 | `dept_name` | 否 | 部门名称，脚本内解析为 `dept_id` |
 | `page` | 否 | 默认 `1` |
-| `page_size` | 否 | 默认 `500` |
+| `limit` | 否 | 每页条数，默认 `500`（对应平台 `PaginationReq.limit`） |
+| `page_size` | 否 | `limit` 的别名，脚本会转成 `limit` |
 
 ### 内部解析接口（脚本自动调用，一般无需直接编排）
 
 | 用途 | 方法 | 路径 | 查询参数 |
 |------|------|------|----------|
 | 人名 → 用户 ID | GET | `/manage_api/user/get_user_info_by_nick_name` | `nick_name` |
-| 部门名 → 部门 ID | GET | `/manage_api/department/get_dept_info_by_dept_name` | `dept_name` |
+| 部门名 → 部门 ID | GET | `/manage_api/menu_department/get_dept_info_by_dept_name` | `dept_name` |
 
-解析成功后从响应 `data.id` 取值。`data` 为空则返回 `resolve_failed`。
+平台响应为 GoFrame 包装：`{code, msg, data}`，实体常在 `data.data`。解析成功后取 `id`；`code != 0` 或无 id 则返回 `resolve_failed`。
 
 ### 成功响应关键字段
 

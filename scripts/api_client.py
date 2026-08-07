@@ -92,8 +92,22 @@ def api_request(
         raise ClientError("request_failed", "invalid json response") from e
 
 
+def _business_data(payload: Any) -> Any:
+    """Unwrap GoFrame {code,msg,data} and nested Res.data when present."""
+    if not isinstance(payload, dict):
+        return None
+    if "code" in payload and payload.get("code") not in (0, "0", None, ""):
+        msg = payload.get("msg") or f"business code {payload.get('code')}"
+        raise ClientError("resolve_failed", str(msg))
+    data = payload.get("data", payload)
+    # Res itself often has a nested "data" field (no top-level id)
+    if isinstance(data, dict) and "data" in data and "id" not in data:
+        return data.get("data")
+    return data
+
+
 def _extract_id(payload: Any, label: str) -> Any:
-    data = payload.get("data") if isinstance(payload, dict) else None
+    data = _business_data(payload)
     if not data:
         raise ClientError("resolve_failed", f"{label} not found")
     if isinstance(data, list):
@@ -118,7 +132,7 @@ def resolve_user_id(user_name: str) -> str:
 def resolve_dept_id(dept_name: str) -> int:
     payload = api_request(
         "GET",
-        "/manage_api/department/get_dept_info_by_dept_name",
+        "/manage_api/menu_department/get_dept_info_by_dept_name",
         {"dept_name": dept_name},
     )
     return int(_extract_id(payload, f"dept: {dept_name}"))
@@ -150,7 +164,8 @@ OPERATIONS: dict[str, dict[str, Any]] = {
             "dept_id",
             "dept_name",
             "page",
-            "page_size",
+            "limit",
+            "page_size",  # alias → limit
         ],
         "required": ["start_date", "end_date"],
         "resolve_names": True,
@@ -160,7 +175,7 @@ OPERATIONS: dict[str, dict[str, Any]] = {
             "user_id",
             "dept_id",
             "page",
-            "page_size",
+            "limit",
         ],
     },
 }
@@ -183,8 +198,12 @@ def run_operation(name: str, params: dict[str, Any]) -> Any:
     resolved = apply_name_resolution(params) if meta.get("resolve_names") else dict(params)
     if "page" not in resolved or resolved["page"] in (None, ""):
         resolved["page"] = 1
-    if "page_size" not in resolved or resolved["page_size"] in (None, ""):
-        resolved["page_size"] = 500
+    # 51PM PaginationReq uses `limit`; accept page_size as alias
+    if (resolved.get("limit") in (None, "")) and resolved.get("page_size") not in (None, ""):
+        resolved["limit"] = resolved["page_size"]
+    if "limit" not in resolved or resolved["limit"] in (None, ""):
+        resolved["limit"] = 500
+    resolved.pop("page_size", None)
     query = {
         k: resolved[k]
         for k in meta["upstream_params"]

@@ -128,6 +128,20 @@ def test_resolve_user_not_found(monkeypatch):
         assert e.error == "resolve_failed"
 
 
+def test_resolve_user_unwraps_goframe_envelope(monkeypatch):
+    monkeypatch.setenv("PM_PLATFORM_BASE_URL", "https://pm.example.com")
+    monkeypatch.setenv("PM_PLATFORM_AUTH_TYPE", "api_key")
+    monkeypatch.setenv("PM_PLATFORM_API_KEY", "tok")
+    import api_client
+
+    monkeypatch.setattr(
+        api_client,
+        "api_request",
+        lambda *a, **k: {"code": 0, "msg": "", "data": {"data": {"id": 474, "nick_name": "朱晓辉"}}},
+    )
+    assert api_client.resolve_user_id("朱晓辉") == "474"
+
+
 def test_run_get_work_hours_resolves_and_calls(monkeypatch):
     monkeypatch.setenv("PM_PLATFORM_BASE_URL", "https://pm.example.com")
     monkeypatch.setenv("PM_PLATFORM_AUTH_TYPE", "api_key")
