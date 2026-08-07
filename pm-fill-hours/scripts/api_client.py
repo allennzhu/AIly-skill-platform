@@ -132,3 +132,60 @@ def api_request(
         raise ClientError("request_failed", "invalid json response") from e
     _check_business_code(payload)
     return payload
+
+
+def _unwrap_data(payload: Any) -> Any:
+    """Extract business payload from GoFrame {code, data, msg} envelope."""
+    if isinstance(payload, dict) and "data" in payload:
+        inner = payload["data"]
+        if inner is not None:
+            return inner
+    return payload
+
+
+def _extract_access_token(payload: Any) -> str:
+    """Extract user access token from impersonate response (data.token_info.access_token)."""
+    data = _unwrap_data(payload)
+    if not isinstance(data, dict):
+        raise ClientError("business_error", "missing token_info in impersonate response")
+    token_info = data.get("token_info") or data.get("TokenInfo") or {}
+    if not isinstance(token_info, dict):
+        raise ClientError("business_error", "missing token_info in impersonate response")
+    token = (
+        token_info.get("access_token")
+        or token_info.get("token")
+        or token_info.get("Token")
+    )
+    if not token:
+        raise ClientError("business_error", "missing access_token in impersonate response")
+    return str(token)
+
+
+def resolve_feishu_user(open_id: str) -> dict:
+    payload = api_request(
+        "GET",
+        "/manage_api/qiye_user/get_user_by_feishu_open_id",
+        params={"feishu_open_id": open_id},
+    )
+    data = _unwrap_data(payload)
+    if not isinstance(data, dict):
+        raise ClientError("business_error", "invalid user response")
+    return data
+
+
+def impersonate(user_id: int) -> str:
+    payload = api_request(
+        "POST",
+        "/manage_api/user/impersonate_user",
+        json_body={"target_user_id": user_id},
+    )
+    return _extract_access_token(payload)
+
+
+def session_user_token(open_id: str) -> tuple[dict, str]:
+    user = resolve_feishu_user(open_id)
+    user_id = user.get("user_id")
+    if user_id is None:
+        raise ClientError("business_error", "missing user_id in feishu user response")
+    token = impersonate(int(user_id))
+    return user, token

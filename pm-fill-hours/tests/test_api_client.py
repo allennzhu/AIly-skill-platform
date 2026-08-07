@@ -88,6 +88,64 @@ def test_api_request_post_json_body(monkeypatch):
         assert json.loads(req.data.decode()) == {"target_user_id": 42}
 
 
+def test_unwrap_data_extracts_goframe_envelope():
+    import api_client
+
+    assert api_client._unwrap_data({"code": 0, "data": {"user_id": 1}}) == {"user_id": 1}
+    assert api_client._unwrap_data({"user_id": 1}) == {"user_id": 1}
+
+
+def test_extract_access_token_from_token_info():
+    import api_client
+
+    payload = {"code": 0, "data": {"token_info": {"access_token": "u-token"}}}
+    assert api_client._extract_access_token(payload) == "u-token"
+
+
+def test_resolve_feishu_user(monkeypatch):
+    import api_client
+
+    def fake(method, path, params=None, token=None, json_body=None):
+        assert method == "GET"
+        assert path == "/manage_api/qiye_user/get_user_by_feishu_open_id"
+        assert params == {"feishu_open_id": "ou_1"}
+        return {"code": 0, "data": {"user_id": 474, "nick_name": "朱晓辉"}}
+
+    monkeypatch.setattr(api_client, "api_request", fake)
+    user = api_client.resolve_feishu_user("ou_1")
+    assert user["user_id"] == 474
+    assert user["nick_name"] == "朱晓辉"
+
+
+def test_impersonate(monkeypatch):
+    import api_client
+
+    def fake(method, path, params=None, token=None, json_body=None):
+        assert method == "POST"
+        assert path == "/manage_api/user/impersonate_user"
+        assert json_body == {"target_user_id": 474}
+        return {"code": 0, "data": {"token_info": {"access_token": "u-token"}}}
+
+    monkeypatch.setattr(api_client, "api_request", fake)
+    assert api_client.impersonate(474) == "u-token"
+
+
+def test_session_user_token(monkeypatch):
+    import api_client
+
+    def fake(method, path, params=None, token=None, json_body=None):
+        if "get_user_by_feishu_open_id" in path:
+            return {"code": 0, "data": {"user_id": 474, "nick_name": "朱晓辉"}}
+        if "impersonate_user" in path:
+            return {"code": 0, "data": {"token_info": {"access_token": "u-token"}}}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(api_client, "api_request", fake)
+    user, tok = api_client.session_user_token("ou_1")
+    assert user["user_id"] == 474
+    assert tok == "u-token"
+
+
 def test_api_request_business_error(monkeypatch):
     monkeypatch.setenv("PM_PLATFORM_BASE_URL", "https://pm.example.com")
     monkeypatch.setenv("PM_PLATFORM_API_KEY", "super")
