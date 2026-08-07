@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -37,14 +38,52 @@ def emit_error_and_exit(error: str, detail: str, status: int | None = None) -> N
     sys.exit(1)
 
 
+def _load_file_config() -> dict[str, str]:
+    """Aily 市场页通常没有环境变量入口，因此支持 scripts/config.json。"""
+    here = Path(__file__).resolve().parent
+    for path in (here / "config.json", here.parent / "config.json"):
+        if not path.is_file():
+            continue
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            raise ConfigError(f"invalid config file {path}: {e}") from e
+        if not isinstance(raw, dict):
+            raise ConfigError(f"invalid config file {path}: must be a JSON object")
+        return {
+            "base_url": str(
+                raw.get("base_url") or raw.get("PM_PLATFORM_BASE_URL") or ""
+            ).rstrip("/"),
+            "auth_type": str(
+                raw.get("auth_type") or raw.get("PM_PLATFORM_AUTH_TYPE") or ""
+            ).strip(),
+            "api_key": str(
+                raw.get("api_key") or raw.get("PM_PLATFORM_API_KEY") or ""
+            ).strip(),
+        }
+    return {}
+
+
 def load_config() -> dict[str, str]:
-    base_url = os.environ.get("PM_PLATFORM_BASE_URL", "").rstrip("/")
-    auth_type = os.environ.get("PM_PLATFORM_AUTH_TYPE", "").strip()
-    api_key = os.environ.get("PM_PLATFORM_API_KEY", "").strip()
+    file_cfg = _load_file_config()
+    # 环境变量优先，其次 config.json（适配 Aily 无环境变量 UI 的情况）
+    base_url = (
+        os.environ.get("PM_PLATFORM_BASE_URL") or file_cfg.get("base_url") or ""
+    ).rstrip("/")
+    auth_type = (
+        os.environ.get("PM_PLATFORM_AUTH_TYPE") or file_cfg.get("auth_type") or ""
+    ).strip()
+    api_key = (
+        os.environ.get("PM_PLATFORM_API_KEY") or file_cfg.get("api_key") or ""
+    ).strip()
     if not base_url:
-        raise ConfigError("PM_PLATFORM_BASE_URL missing")
+        raise ConfigError(
+            "PM_PLATFORM_BASE_URL missing (set env or scripts/config.json)"
+        )
     if not api_key:
-        raise ConfigError("PM_PLATFORM_API_KEY missing")
+        raise ConfigError(
+            "PM_PLATFORM_API_KEY missing (set env or scripts/config.json)"
+        )
     if auth_type and auth_type != "api_key":
         raise ConfigError("PM_PLATFORM_AUTH_TYPE must be api_key")
     return {

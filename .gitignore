@@ -5,3 +5,5 @@ __pycache__/
 .pytest_cache/
 output/
 *.skill
+scripts/config.json
+config.json

@@ -14,15 +14,18 @@ Aily Skill：对接 51PM 项目管理平台工时 API，用于查询工时并生
     └── api_docs.md
 ```
 
-## 环境变量
+## 在飞书 Aily 中配置凭证
 
-| 变量 | 说明 |
-|------|------|
-| `PM_PLATFORM_BASE_URL` | 平台 API 根地址，如 `https://pm.example.com` |
-| `PM_PLATFORM_AUTH_TYPE` | 固定 `api_key` |
-| `PM_PLATFORM_API_KEY` | Bearer Token |
+当前 Aily「编辑信息」只有名称/描述，**没有环境变量入口**。请用配置文件：
 
-可参考 `.env.example`。不要把真实 Token 提交到仓库。
+1. 复制 `scripts/config.example.json` 为 `scripts/config.json`
+2. 填入真实 `base_url` / `api_key`
+3. 重新打包：`python scripts/package_skill.py . ./output`
+4. 在 Aily 市场 → 技能 → 我创建的 → 项目管理平台API → **更新技能文件**，上传新的 `pm-platform-api.skill`
+
+本地调试仍可用环境变量（优先级高于 config.json）。
+
+`scripts/config.json` 含 Token，已加入 `.gitignore`，不要提交到 Git。
 
 ## 本地使用
 

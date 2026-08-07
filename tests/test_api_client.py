@@ -8,6 +8,7 @@ def test_load_config_requires_api_key(monkeypatch):
     monkeypatch.setenv("PM_PLATFORM_AUTH_TYPE", "api_key")
     import api_client
 
+    monkeypatch.setattr(api_client, "_load_file_config", lambda: {})
     try:
         api_client.load_config()
         assert False, "expected ConfigError"
@@ -25,6 +26,31 @@ def test_load_config_ok(monkeypatch):
     assert cfg["base_url"] == "https://pm.example.com"
     assert cfg["api_key"] == "tok"
     assert cfg["auth_type"] == "api_key"
+
+
+def test_load_config_from_file(monkeypatch, tmp_path):
+    monkeypatch.delenv("PM_PLATFORM_BASE_URL", raising=False)
+    monkeypatch.delenv("PM_PLATFORM_AUTH_TYPE", raising=False)
+    monkeypatch.delenv("PM_PLATFORM_API_KEY", raising=False)
+    import api_client
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(
+        '{"base_url":"https://file.example.com","auth_type":"api_key","api_key":"filetok"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        api_client,
+        "_load_file_config",
+        lambda: {
+            "base_url": "https://file.example.com",
+            "auth_type": "api_key",
+            "api_key": "filetok",
+        },
+    )
+    cfg = api_client.load_config()
+    assert cfg["base_url"] == "https://file.example.com"
+    assert cfg["api_key"] == "filetok"
 
 
 def test_error_payload_includes_status():
