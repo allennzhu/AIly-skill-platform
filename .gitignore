@@ -6,4 +6,5 @@ __pycache__/
 output/
 *.skill
 scripts/config.json
+pm-fill-hours/scripts/config.json
 config.json
