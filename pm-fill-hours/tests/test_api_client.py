@@ -146,6 +146,78 @@ def test_session_user_token(monkeypatch):
     assert tok == "u-token"
 
 
+def test_list_doing_tasks_merges(monkeypatch):
+    import api_client
+
+    calls = []
+
+    def fake(method, path, params=None, token=None, json_body=None):
+        calls.append(path)
+        if "get_not_task_list" in path:
+            return {
+                "code": 0,
+                "data": {
+                    "data": [{"id": 2, "name": "会议", "project_name": ""}],
+                },
+            }
+        return {
+            "code": 0,
+            "data": {"data": [{"id": 1, "name": "开发", "project_name": "51PM"}]},
+        }
+
+    monkeypatch.setattr(api_client, "api_request", fake)
+    opts = api_client.list_doing_tasks("u", None)
+    assert {o["task_kind"] for o in opts} == {"project", "not_project"}
+    assert len(opts) == 2
+    assert opts[0]["task_id"] == 1
+    assert opts[0]["name"] == "开发"
+    assert opts[0]["project_name"] == "51PM"
+    assert opts[1]["task_id"] == 2
+    assert opts[1]["name"] == "会议"
+    assert "/manage_api/main_panel/get_task_list" in calls
+    assert "/manage_api/main_panel/get_not_task_list" in calls
+
+
+def test_list_doing_tasks_filters_by_kind(monkeypatch):
+    import api_client
+
+    def fake(method, path, params=None, token=None, json_body=None):
+        assert params == {"status": ["doing"]}
+        assert token == "u"
+        return {"code": 0, "data": {"data": [{"id": 1, "name": "开发", "project_name": "51PM"}]}}
+
+    monkeypatch.setattr(api_client, "api_request", fake)
+    opts = api_client.list_doing_tasks("u", "project")
+    assert len(opts) == 1
+    assert opts[0]["task_kind"] == "project"
+
+
+def test_submit_estimate_routes_by_task_kind(monkeypatch):
+    import api_client
+
+    calls = []
+
+    def fake(method, path, params=None, token=None, json_body=None):
+        calls.append((method, path, token, json_body))
+        return {"code": 0, "data": {}}
+
+    monkeypatch.setattr(api_client, "api_request", fake)
+    api_client.submit_estimate("tok", "project", 1, "2026-08-07", 2.0, "done")
+    api_client.submit_estimate("tok", "not_project", 2, "2026-08-07", 1.0, "meeting")
+    assert calls[0] == (
+        "POST",
+        "/manage_api/project_task_estimate/add",
+        "tok",
+        {"task_id": 1, "date": "2026-08-07", "consumed": 2.0, "remark": "done"},
+    )
+    assert calls[1] == (
+        "POST",
+        "/manage_api/project_not_task_estimate/add",
+        "tok",
+        {"task_id": 2, "date": "2026-08-07", "consumed": 1.0, "remark": "meeting"},
+    )
+
+
 def test_api_request_business_error(monkeypatch):
     monkeypatch.setenv("PM_PLATFORM_BASE_URL", "https://pm.example.com")
     monkeypatch.setenv("PM_PLATFORM_API_KEY", "super")

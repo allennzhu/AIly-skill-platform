@@ -189,3 +189,74 @@ def session_user_token(open_id: str) -> tuple[dict, str]:
         raise ClientError("business_error", "missing user_id in feishu user response")
     token = impersonate(int(user_id))
     return user, token
+
+
+def _normalize_task_item(item: dict, task_kind: str) -> dict:
+    return {
+        "task_id": item.get("id") or item.get("task_id"),
+        "name": item.get("name", ""),
+        "project_name": item.get("project_name", ""),
+        "task_kind": task_kind,
+    }
+
+
+def _fetch_doing_tasks(user_token: str, path: str, task_kind: str) -> list[dict]:
+    payload = api_request(
+        "GET",
+        path,
+        params={"status": ["doing"]},
+        token=user_token,
+    )
+    data = _unwrap_data(payload)
+    if isinstance(data, dict):
+        items = data.get("data") or []
+    elif isinstance(data, list):
+        items = data
+    else:
+        items = []
+    return [_normalize_task_item(item, task_kind) for item in items if isinstance(item, dict)]
+
+
+def list_doing_tasks(user_token: str, task_kind: str | None) -> list[dict]:
+    if task_kind == "project":
+        return _fetch_doing_tasks(
+            user_token, "/manage_api/main_panel/get_task_list", "project"
+        )
+    if task_kind == "not_project":
+        return _fetch_doing_tasks(
+            user_token, "/manage_api/main_panel/get_not_task_list", "not_project"
+        )
+    project_tasks = _fetch_doing_tasks(
+        user_token, "/manage_api/main_panel/get_task_list", "project"
+    )
+    not_project_tasks = _fetch_doing_tasks(
+        user_token, "/manage_api/main_panel/get_not_task_list", "not_project"
+    )
+    return project_tasks + not_project_tasks
+
+
+def submit_estimate(
+    user_token: str,
+    task_kind: str,
+    task_id: int,
+    date: str,
+    consumed: float,
+    remark: str,
+) -> Any:
+    if task_kind == "project":
+        path = "/manage_api/project_task_estimate/add"
+    elif task_kind == "not_project":
+        path = "/manage_api/project_not_task_estimate/add"
+    else:
+        raise ClientError("business_error", f"unknown task_kind: {task_kind}")
+    return api_request(
+        "POST",
+        path,
+        token=user_token,
+        json_body={
+            "task_id": task_id,
+            "date": date,
+            "consumed": consumed,
+            "remark": remark,
+        },
+    )
