@@ -15,7 +15,7 @@
 
 | 参数 | 必填 | 说明 |
 |------|------|------|
-| `feishu_open_id` | 是 | 飞书 open_id，标识当前会话用户 |
+| `feishu_union_id` | 是 | 飞书 **union_id**（跨应用唯一，不是 open_id） |
 | `task_id` | 否 | 任务 ID（整数）；缺则返回 `task_options` |
 | `task_kind` | 否 | `project` 或 `not_project`；影响任务列表过滤与提交路径 |
 | `date` | 否 | 填报日期 `YYYY-MM-DD`；缺省为当天 |
@@ -63,7 +63,7 @@ stdout 输出 JSON，退出码 `0`：
 
 ```bash
 python3 scripts/api_client.py fill_hours_step \
-  --param feishu_open_id ou_xxxxxxxx \
+  --param feishu_union_id on_xxxxxxxx \
   --param consumed 2 \
   --param remark 联调
 ```
@@ -72,7 +72,7 @@ python3 scripts/api_client.py fill_hours_step \
 
 | 用途 | 方法 | 路径 | 说明 |
 |------|------|------|------|
-| open_id → 用户 | GET | `/manage_api/qiye_user/get_user_by_feishu_open_id` | 查询参数 `feishu_open_id`；超管 Token |
+| union_id → 用户 | GET | `/manage_api/qiye_user/get_user_by_feishu_union_id` | 查询参数 `feishu_union_id`；超管 Token |
 | 模拟登录 | POST | `/manage_api/user/impersonate_user` | Body `{"target_user_id": <id>}`；超管 Token；取 `data.token_info.access_token` |
 | 进行中项目任务 | GET | `/manage_api/main_panel/get_task_list` | `status=doing`；用户 Token |
 | 进行中非项目任务 | GET | `/manage_api/main_panel/get_not_task_list` | `status=doing`；用户 Token |
@@ -86,7 +86,7 @@ python3 scripts/api_client.py fill_hours_step \
 失败时 stdout 输出，进程退出码非 0：
 
 ```json
-{"error": "validation_error", "detail": "missing required param: feishu_open_id"}
+{"error": "validation_error", "detail": "missing required param: feishu_union_id"}
 ```
 
 | error | 含义 |

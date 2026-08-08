@@ -107,12 +107,12 @@ def test_resolve_feishu_user(monkeypatch):
 
     def fake(method, path, params=None, token=None, json_body=None):
         assert method == "GET"
-        assert path == "/manage_api/qiye_user/get_user_by_feishu_open_id"
-        assert params == {"feishu_open_id": "ou_1"}
+        assert path == "/manage_api/qiye_user/get_user_by_feishu_union_id"
+        assert params == {"feishu_union_id": "on_1"}
         return {"code": 0, "data": {"user_id": 474, "nick_name": "朱晓辉"}}
 
     monkeypatch.setattr(api_client, "api_request", fake)
-    user = api_client.resolve_feishu_user("ou_1")
+    user = api_client.resolve_feishu_user("on_1")
     assert user["user_id"] == 474
     assert user["nick_name"] == "朱晓辉"
 
@@ -134,14 +134,14 @@ def test_session_user_token(monkeypatch):
     import api_client
 
     def fake(method, path, params=None, token=None, json_body=None):
-        if "get_user_by_feishu_open_id" in path:
+        if "get_user_by_feishu_union_id" in path:
             return {"code": 0, "data": {"user_id": 474, "nick_name": "朱晓辉"}}
         if "impersonate_user" in path:
             return {"code": 0, "data": {"token_info": {"access_token": "u-token"}}}
         raise AssertionError(path)
 
     monkeypatch.setattr(api_client, "api_request", fake)
-    user, tok = api_client.session_user_token("ou_1")
+    user, tok = api_client.session_user_token("on_1")
     assert user["user_id"] == 474
     assert tok == "u-token"
 
@@ -239,7 +239,7 @@ def test_fill_hours_step_need_task(monkeypatch):
         ],
     )
     out = api_client.fill_hours_step(
-        {"feishu_open_id": "ou_x", "consumed": "2", "remark": "联调"}
+        {"feishu_union_id": "on_x", "consumed": "2", "remark": "联调"}
     )
     assert out["status"] == "need_input"
     assert "task_id" in out["missing_fields"]
@@ -259,7 +259,7 @@ def test_fill_hours_step_submit(monkeypatch):
     )
     out = api_client.fill_hours_step(
         {
-            "feishu_open_id": "ou_x",
+            "feishu_union_id": "on_x",
             "task_id": "9",
             "task_kind": "project",
             "date": "2026-08-07",

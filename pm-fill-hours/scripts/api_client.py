@@ -164,11 +164,11 @@ def _extract_access_token(payload: Any) -> str:
     return str(token)
 
 
-def resolve_feishu_user(open_id: str) -> dict:
+def resolve_feishu_user(union_id: str) -> dict:
     payload = api_request(
         "GET",
-        "/manage_api/qiye_user/get_user_by_feishu_open_id",
-        params={"feishu_open_id": open_id},
+        "/manage_api/qiye_user/get_user_by_feishu_union_id",
+        params={"feishu_union_id": union_id},
     )
     data = _unwrap_data(payload)
     if not isinstance(data, dict):
@@ -185,8 +185,8 @@ def impersonate(user_id: int) -> str:
     return _extract_access_token(payload)
 
 
-def session_user_token(open_id: str) -> tuple[dict, str]:
-    user = resolve_feishu_user(open_id)
+def session_user_token(union_id: str) -> tuple[dict, str]:
+    user = resolve_feishu_user(union_id)
     user_id = user.get("user_id")
     if user_id is None:
         raise ClientError("business_error", "missing user_id in feishu user response")
@@ -296,9 +296,9 @@ def _missing_question(field: str) -> str:
 
 def fill_hours_step(params: dict) -> dict:
     """Collect one fill-hours turn or submit a completed estimate."""
-    open_id = str(params.get("feishu_open_id") or "").strip()
-    if not open_id:
-        raise ClientError("validation_error", "missing required param: feishu_open_id")
+    union_id = str(params.get("feishu_union_id") or "").strip()
+    if not union_id:
+        raise ClientError("validation_error", "missing required param: feishu_union_id")
 
     collected = {
         "task_id": params.get("task_id") or None,
@@ -307,7 +307,7 @@ def fill_hours_step(params: dict) -> dict:
         "consumed": params.get("consumed") or None,
         "remark": params.get("remark") or None,
     }
-    user, user_token = session_user_token(open_id)
+    user, user_token = session_user_token(union_id)
     missing_fields = [
         field
         for field in ("task_id", "task_kind", "consumed", "remark")

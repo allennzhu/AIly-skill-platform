@@ -21,7 +21,7 @@ pm-fill-hours/
 ## 配置
 
 1. 复制 `scripts/config.example.json` 为 `scripts/config.json`
-2. 填入超管 `base_url` / `api_key`（用于 open_id 解析与 impersonate）
+2. 填入超管 `base_url` / `api_key`（用于 union_id 解析与 impersonate）
 
 示例：
 

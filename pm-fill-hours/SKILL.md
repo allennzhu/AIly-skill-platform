@@ -19,7 +19,7 @@ python3 scripts/api_client.py fill_hours_step --param KEY VALUE
 
 ## 多轮编排
 
-1. **取 `feishu_open_id`**：从 Aily 当前会话上下文获取飞书 open_id，每次调用 `fill_hours_step` 都必须传入 `--param feishu_open_id <open_id>`。
+1. **取 `feishu_union_id`（重要）**：从 Aily 当前会话上下文获取飞书 **union_id**（跨应用唯一，不是 open_id）。每次调用 `fill_hours_step` 都必须传入 `--param feishu_union_id <union_id>`。
 2. **首轮调用**：从用户话中抽取 `consumed`（工时）、`remark`（备注）、`date`（默认今天 `YYYY-MM-DD`）、`task_kind`（`project` / `not_project`，可选）。能确定的参数一并传入。
 3. **按 `status` 处理**：
    - **`need_input`**：向用户展示 `next_question`；若含 `task_options`，以序号列表展示（序号、`name`、`project_name`、`task_kind`）。用户回复后，将对应字段写入 `--param` 再次调用（选任务时传 `task_id` 与 `task_kind`）。
@@ -29,18 +29,18 @@ python3 scripts/api_client.py fill_hours_step --param KEY VALUE
 
 ## 调用示例
 
-仅 open_id（脚本会返回待选任务列表）：
+仅 union_id（脚本会返回待选任务列表）：
 
 ```bash
 python3 scripts/api_client.py fill_hours_step \
-  --param feishu_open_id ou_xxxxxxxx
+  --param feishu_union_id on_xxxxxxxx
 ```
 
 补齐参数后提交：
 
 ```bash
 python3 scripts/api_client.py fill_hours_step \
-  --param feishu_open_id ou_xxxxxxxx \
+  --param feishu_union_id on_xxxxxxxx \
   --param task_id 123 \
   --param task_kind project \
   --param date 2026-08-07 \
@@ -50,7 +50,7 @@ python3 scripts/api_client.py fill_hours_step \
 
 ## 配置
 
-超管 `base_url` / `api_key` 用于 open_id 解析与 impersonate，见 `scripts/config.example.json` → 复制为 `scripts/config.json`（勿提交 Git）。环境变量 `PM_PLATFORM_*` 优先于配置文件。
+超管 `base_url` / `api_key` 用于 union_id 解析与 impersonate，见 `scripts/config.example.json` → 复制为 `scripts/config.json`（勿提交 Git）。环境变量 `PM_PLATFORM_*` 优先于配置文件。
 
 ## 扩展
 
