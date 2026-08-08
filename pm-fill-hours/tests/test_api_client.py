@@ -218,6 +218,58 @@ def test_submit_estimate_routes_by_task_kind(monkeypatch):
     )
 
 
+def test_fill_hours_step_need_task(monkeypatch):
+    import api_client
+
+    monkeypatch.setattr(
+        api_client,
+        "session_user_token",
+        lambda oid: ({"user_id": 1, "nick_name": "A"}, "tok"),
+    )
+    monkeypatch.setattr(
+        api_client,
+        "list_doing_tasks",
+        lambda tok, kind=None: [
+            {
+                "task_id": 9,
+                "name": "开发",
+                "project_name": "P",
+                "task_kind": "project",
+            }
+        ],
+    )
+    out = api_client.fill_hours_step(
+        {"feishu_open_id": "ou_x", "consumed": "2", "remark": "联调"}
+    )
+    assert out["status"] == "need_input"
+    assert "task_id" in out["missing_fields"]
+    assert out["task_options"][0]["task_id"] == 9
+
+
+def test_fill_hours_step_submit(monkeypatch):
+    import api_client
+
+    monkeypatch.setattr(
+        api_client,
+        "session_user_token",
+        lambda oid: ({"user_id": 1, "nick_name": "A"}, "tok"),
+    )
+    monkeypatch.setattr(
+        api_client, "submit_estimate", lambda *a, **k: {"code": 0, "data": {}}
+    )
+    out = api_client.fill_hours_step(
+        {
+            "feishu_open_id": "ou_x",
+            "task_id": "9",
+            "task_kind": "project",
+            "date": "2026-08-07",
+            "consumed": "2",
+            "remark": "联调",
+        }
+    )
+    assert out["status"] == "submitted"
+
+
 def test_api_request_business_error(monkeypatch):
     monkeypatch.setenv("PM_PLATFORM_BASE_URL", "https://pm.example.com")
     monkeypatch.setenv("PM_PLATFORM_API_KEY", "super")

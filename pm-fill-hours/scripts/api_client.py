@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import sys
+from datetime import date as calendar_date
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -260,3 +263,138 @@ def submit_estimate(
             "remark": remark,
         },
     )
+
+
+def _step_response(
+    status: str,
+    user: dict | None,
+    collected: dict[str, Any],
+    missing_fields: list[str] | None = None,
+    next_question: str | None = None,
+    task_options: list[dict] | None = None,
+    result: Any = None,
+) -> dict:
+    return {
+        "status": status,
+        "user": user,
+        "collected": collected,
+        "missing_fields": missing_fields or [],
+        "next_question": next_question,
+        "task_options": task_options or [],
+        "result": result,
+    }
+
+
+def _missing_question(field: str) -> str:
+    questions = {
+        "task_kind": "请选择任务类型（project 或 not_project）",
+        "consumed": "请输入本次填写的工时（正数）",
+        "remark": "请输入工时备注",
+    }
+    return questions[field]
+
+
+def fill_hours_step(params: dict) -> dict:
+    """Collect one fill-hours turn or submit a completed estimate."""
+    open_id = str(params.get("feishu_open_id") or "").strip()
+    if not open_id:
+        raise ClientError("validation_error", "missing required param: feishu_open_id")
+
+    collected = {
+        "task_id": params.get("task_id") or None,
+        "task_kind": params.get("task_kind") or None,
+        "date": params.get("date") or calendar_date.today().isoformat(),
+        "consumed": params.get("consumed") or None,
+        "remark": params.get("remark") or None,
+    }
+    user, user_token = session_user_token(open_id)
+    missing_fields = [
+        field
+        for field in ("task_id", "task_kind", "consumed", "remark")
+        if collected[field] in (None, "")
+    ]
+    if missing_fields:
+        if "task_id" in missing_fields:
+            options = list_doing_tasks(user_token, collected["task_kind"])
+            task_options = [
+                {"index": index, **task} for index, task in enumerate(options, start=1)
+            ]
+            return _step_response(
+                "need_input",
+                user,
+                collected,
+                missing_fields,
+                "请选择要填工时的任务（回复序号或任务名）",
+                task_options,
+            )
+        return _step_response(
+            "need_input",
+            user,
+            collected,
+            missing_fields,
+            _missing_question(missing_fields[0]),
+        )
+
+    try:
+        task_id = int(collected["task_id"])
+    except (TypeError, ValueError) as e:
+        raise ClientError("validation_error", "task_id must be an integer") from e
+    try:
+        consumed = float(collected["consumed"])
+    except (TypeError, ValueError) as e:
+        raise ClientError("validation_error", "consumed must be a positive number") from e
+    if consumed <= 0:
+        raise ClientError("validation_error", "consumed must be a positive number")
+    if collected["task_kind"] not in {"project", "not_project"}:
+        raise ClientError(
+            "validation_error", "task_kind must be project or not_project"
+        )
+
+    result = submit_estimate(
+        user_token,
+        collected["task_kind"],
+        task_id,
+        str(collected["date"]),
+        consumed,
+        str(collected["remark"]),
+    )
+    return _step_response("submitted", user, collected, result=result)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="51PM fill-hours API client")
+    parser.add_argument("operation", nargs="?", help="operation name")
+    parser.add_argument("--list-ops", action="store_true")
+    parser.add_argument(
+        "--param",
+        nargs=2,
+        action="append",
+        default=[],
+        metavar=("KEY", "VALUE"),
+    )
+    args = parser.parse_args(argv)
+    try:
+        if args.list_ops:
+            print(json.dumps(["fill_hours_step"], ensure_ascii=False, indent=2))
+            return 0
+        if args.operation != "fill_hours_step":
+            raise ClientError(
+                "unknown_operation",
+                args.operation or "operation name required (or use --list-ops)",
+            )
+        params = {key: value for key, value in args.param}
+        print(json.dumps(fill_hours_step(params), ensure_ascii=False))
+        return 0
+    except ConfigError as e:
+        print(json.dumps({"error": "config_error", "detail": str(e)}, ensure_ascii=False))
+        return 1
+    except ClientError as e:
+        payload = {"error": e.error, "detail": e.detail}
+        if e.status is not None:
+            payload["status"] = e.status
+        print(json.dumps(payload, ensure_ascii=False))
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
