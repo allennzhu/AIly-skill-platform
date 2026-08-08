@@ -40,11 +40,14 @@ def package_skill(src_dir: Path, out_dir: Path) -> Path:
             if not base.exists():
                 continue
             for path in base.rglob("*"):
-                if path.is_file():
-                    zf.write(
-                        path,
-                        arcname=str(path.relative_to(src_dir)).replace("\\", "/"),
-                    )
+                if not path.is_file():
+                    continue
+                if "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}:
+                    continue
+                zf.write(
+                    path,
+                    arcname=str(path.relative_to(src_dir)).replace("\\", "/"),
+                )
     return out_path
 
 
