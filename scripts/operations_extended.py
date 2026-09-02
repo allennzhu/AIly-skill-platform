@@ -118,6 +118,7 @@ def resolve_extended(mode: str, params: dict[str, Any]) -> dict[str, Any]:
         "publish_list": _resolve_publish_list,
         "apply_publish_list": _resolve_apply_publish_list,
         "task_list": _resolve_task_list,
+        "project_demand_list": _resolve_project_demand_list,
         "project_risk_panel": _resolve_project_risk_panel,
         "project_review_panel": _resolve_project_review_panel,
         "project_change_info": _resolve_project_change_info,
@@ -435,10 +436,59 @@ def _resolve_apply_publish_list(params: dict[str, Any]) -> dict[str, Any]:
 def _resolve_task_list(params: dict[str, Any]) -> dict[str, Any]:
     import api_client
 
+    out = _apply_date_range_aliases(dict(params))
+    out = api_client._apply_field_aliases(
+        out,
+        {
+            "project_name": ("name",),
+            "sj_num": ("opportunity_no", "business_no"),
+        },
+    )
+    if any(out.get(k) for k in _PROJECT_HINT_KEYS) and not out.get("project_id"):
+        out["project_id"] = int(api_client.resolve_project_id(out))
+    elif out.get("project_id") not in (None, ""):
+        out["project_id"] = int(out["project_id"])
+    _cleanup_project_aliases(out)
+
+    assignee_name = out.pop("assignee_name", None) or out.pop("assigned_name", None)
+    user_name = out.pop("user_name", None)
+    if assignee_name and not out.get("assigned_to"):
+        out["assigned_to"] = [int(api_client.resolve_user_id(str(assignee_name)))]
+    elif user_name and not out.get("assigned_to"):
+        out["assigned_to"] = [int(api_client.resolve_user_id(str(user_name)))]
+    elif out.get("assigned_to") not in (None, ""):
+        if not isinstance(out.get("assigned_to"), list):
+            out["assigned_to"] = api_client._parse_int_list(out["assigned_to"])
+
+    for flag in ("assigned_to_me", "done_by_me"):
+        if flag in out and out[flag] not in (None, ""):
+            out[flag] = int(str(out[flag]).strip() in ("1", "true", "True", "yes", "是"))
+
+    date_type = str(out.get("date_type") or "").strip().lower()
+    if date_type in ("任务", "task"):
+        out["date_type"] = "task"
+    elif date_type in ("花费", "cost", ""):
+        if date_type:
+            out["date_type"] = "cost"
+    dept_name = out.pop("dept_name", None)
+    if dept_name and not out.get("dept_id"):
+        out["dept_id"] = int(api_client.resolve_dept_id(str(dept_name)))
+    elif out.get("dept_id") not in (None, ""):
+        out["dept_id"] = int(out["dept_id"])
+    if out.get("one_type") not in (None, ""):
+        out["one_type"] = int(out["one_type"])
+    return out
+
+
+def _resolve_project_demand_list(params: dict[str, Any]) -> dict[str, Any]:
+    import api_client
+
     out = _ensure_project_id(params)
     assignee_name = out.pop("assignee_name", None) or out.pop("assigned_name", None)
     if assignee_name and not out.get("assigned_to"):
-        out["assigned_to"] = api_client.resolve_user_id(str(assignee_name))
+        out["assigned_to"] = int(api_client.resolve_user_id(str(assignee_name)))
+    elif out.get("assigned_to") not in (None, ""):
+        out["assigned_to"] = int(out["assigned_to"])
     for flag in ("assigned_to_me", "done_by_me"):
         if flag in out and out[flag] not in (None, ""):
             out[flag] = int(str(out[flag]).strip() in ("1", "true", "True", "yes", "是"))
@@ -1108,9 +1158,44 @@ EXTENDED_OPERATIONS: dict[str, dict[str, Any]] = {
         ],
         "default_limit": 20,
     },
-    # --- 项目任务 ---
+    # --- 项目任务（task_type=2，走任务接口）---
     "get_task_list": {
-        "description": "项目需求/任务列表",
+        "description": "项目任务列表（不含需求）",
+        "method": "GET",
+        "path": "/manage_api/task/get_task_list",
+        "params": _PROJECT_ALIAS_PARAMS
+        + _PAGINATION_PARAMS
+        + _USER_ROLE_PARAMS
+        + [
+            "status",
+            "name",
+            "start_date",
+            "end_date",
+            "date_start",
+            "date_end",
+            "date_type",
+            "one_type",
+            "assigned_to_me",
+        ],
+        "resolve_mode": "task_list",
+        "upstream_params": [
+            "project_id",
+            "status",
+            "name",
+            "assigned_to",
+            "start_date",
+            "end_date",
+            "date_type",
+            "one_type",
+            "dept_id",
+            "page",
+            "limit",
+        ],
+        "array_params": ["assigned_to"],
+        "default_limit": 20,
+    },
+    "get_project_demand_list": {
+        "description": "项目需求列表（含需求与任务混合树，走需求接口）",
         "method": "GET",
         "path": "/manage_api/project_task/get_task_list",
         "params": _PROJECT_ALIAS_PARAMS
@@ -1125,7 +1210,7 @@ EXTENDED_OPERATIONS: dict[str, dict[str, Any]] = {
             "done_by_me",
         ],
         "required_any_project": True,
-        "resolve_mode": "task_list",
+        "resolve_mode": "project_demand_list",
         "upstream_params": [
             "project_id",
             "status",
@@ -1139,7 +1224,7 @@ EXTENDED_OPERATIONS: dict[str, dict[str, Any]] = {
         "default_limit": 20,
     },
     "get_task_info": {
-        "description": "项目需求/任务详情",
+        "description": "项目任务详情",
         "method": "GET",
         "path": "/manage_api/project_task/get_task_info",
         "params": ["id", "task_id"],

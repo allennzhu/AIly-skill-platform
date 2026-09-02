@@ -14,6 +14,10 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
+DEFAULT_BASE_URL = "http://51pm.51aes.com:218"
+DEFAULT_LOGIN_URL = "http://51pm.51aes.com:771"
+
+
 class ConfigError(Exception):
     pass
 
@@ -54,43 +58,120 @@ def _load_file_config() -> dict[str, str]:
             "base_url": str(
                 raw.get("base_url") or raw.get("PM_PLATFORM_BASE_URL") or ""
             ).rstrip("/"),
-            "auth_type": str(
-                raw.get("auth_type") or raw.get("PM_PLATFORM_AUTH_TYPE") or ""
-            ).strip(),
-            "api_key": str(
-                raw.get("api_key") or raw.get("PM_PLATFORM_API_KEY") or ""
-            ).strip(),
+            "login_url": str(
+                raw.get("login_url") or raw.get("PM_PLATFORM_LOGIN_URL") or ""
+            ).rstrip("/"),
+            "oauth_authorize_url": str(raw.get("oauth_authorize_url") or "").strip(),
+            "oauth_client_id": str(raw.get("oauth_client_id") or "").strip(),
+            "oauth_redirect_uri": str(raw.get("oauth_redirect_uri") or "").strip(),
         }
     return {}
 
 
+def _load_example_config() -> dict[str, str]:
+    here = Path(__file__).resolve().parent
+    path = here / "config.example.json"
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        "base_url": str(raw.get("base_url") or "").rstrip("/"),
+        "login_url": str(raw.get("login_url") or "").rstrip("/"),
+    }
+
+
 def load_config() -> dict[str, str]:
     file_cfg = _load_file_config()
-    # 环境变量优先，其次 config.json（适配 Aily 无环境变量 UI 的情况）
     base_url = (
         os.environ.get("PM_PLATFORM_BASE_URL") or file_cfg.get("base_url") or ""
     ).rstrip("/")
-    auth_type = (
-        os.environ.get("PM_PLATFORM_AUTH_TYPE") or file_cfg.get("auth_type") or ""
-    ).strip()
-    api_key = (
-        os.environ.get("PM_PLATFORM_API_KEY") or file_cfg.get("api_key") or ""
-    ).strip()
     if not base_url:
-        raise ConfigError(
-            "PM_PLATFORM_BASE_URL missing (set env or scripts/config.json)"
-        )
-    if not api_key:
-        raise ConfigError(
-            "PM_PLATFORM_API_KEY missing (set env or scripts/config.json)"
-        )
-    if auth_type and auth_type != "api_key":
-        raise ConfigError("PM_PLATFORM_AUTH_TYPE must be api_key")
+        example_cfg = _load_example_config()
+        base_url = (example_cfg.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
+    if not base_url:
+        base_url = DEFAULT_BASE_URL
+    login_url = (
+        os.environ.get("PM_PLATFORM_LOGIN_URL")
+        or file_cfg.get("login_url")
+        or ""
+    ).rstrip("/")
+    if not login_url:
+        example_cfg = _load_example_config()
+        login_url = (example_cfg.get("login_url") or DEFAULT_LOGIN_URL).rstrip("/")
+    if not login_url:
+        login_url = DEFAULT_LOGIN_URL
     return {
         "base_url": base_url,
-        "auth_type": auth_type or "api_key",
-        "api_key": api_key,
+        "login_url": login_url,
     }
+
+
+def get_login_url() -> str:
+    """51PM 网页登录入口（与 API base_url 端口可能不同）。"""
+    return load_config()["login_url"]
+
+
+_AUTH_RUNTIME: dict[str, Any] = {}
+
+
+def _set_auth_runtime(auth_cfg: Any, access_token: str = "") -> None:
+    _AUTH_RUNTIME["auth_cfg"] = auth_cfg
+    token = str(access_token or "").strip()
+    if token:
+        _AUTH_RUNTIME["access_token"] = token
+
+
+def _runtime_access_token() -> str | None:
+    token = str(_AUTH_RUNTIME.get("access_token") or "").strip()
+    return token or None
+
+
+def _request_with_session(
+    method: str,
+    path: str,
+    params: dict[str, Any] | None = None,
+    *,
+    json_body: dict[str, Any] | None = None,
+) -> Any:
+    token = _runtime_access_token()
+    if token:
+        return api_request(
+            method,
+            path,
+            params,
+            token=token,
+            json_body=json_body,
+            auth_sensitive=True,
+        )
+    return api_request(method, path, params, json_body=json_body)
+
+
+def _clear_auth_runtime() -> None:
+    _AUTH_RUNTIME.clear()
+
+
+def _invalidate_auth_cache() -> None:
+    from auth_session import invalidate_session
+
+    auth_cfg = _AUTH_RUNTIME.get("auth_cfg")
+    if auth_cfg is not None:
+        invalidate_session(auth_cfg)
+
+
+def _auth_required_payload(detail: str, login_url: str = "") -> dict[str, Any]:
+    from auth_session import AuthRequired, build_ecp_login_url, load_auth_config
+
+    if not login_url:
+        auth_cfg = _AUTH_RUNTIME.get("auth_cfg")
+        if auth_cfg is None:
+            auth_cfg = load_auth_config(_load_file_config())
+        login_url = build_ecp_login_url(auth_cfg)
+    return AuthRequired(detail, login_url=login_url).to_payload()
 
 
 def api_request(
@@ -100,21 +181,35 @@ def api_request(
     token: str | None = None,
     json_body: dict[str, Any] | None = None,
     timeout: float = 30.0,
+    *,
+    anonymous: bool = False,
+    auth_sensitive: bool = False,
 ) -> Any:
     cfg = load_config()
     clean_params = {k: v for k, v in (params or {}).items() if v is not None and v != ""}
     url = cfg["base_url"] + path
     if clean_params and method.upper() == "GET":
         url = url + "?" + urlencode(clean_params, doseq=True)
-    bearer = token if token is not None else cfg["api_key"]
     headers = {
-        "Authorization": f"Bearer {bearer}",
         "Accept": "application/json",
     }
+    if not anonymous:
+        if not token:
+            raise ClientError(
+                "auth_required",
+                json.dumps(
+                    _auth_required_payload("缺少登录 Token，请先完成 save-identity 与 51PM 登录"),
+                    ensure_ascii=False,
+                ),
+            )
+        headers["Authorization"] = f"Bearer {token}"
     data: bytes | None = None
     if json_body is not None:
         data = json.dumps(json_body, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json"
+    elif clean_params and method.upper() != "GET":
+        data = urlencode(clean_params, doseq=True).encode("utf-8")
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
     req = Request(url, data=data, headers=headers, method=method.upper())
     try:
         with urlopen(req, timeout=timeout) as resp:
@@ -126,6 +221,13 @@ def api_request(
                 detail = e.fp.read().decode("utf-8") or detail
         except Exception:
             pass
+        if auth_sensitive and e.code in (401, 444):
+            _invalidate_auth_cache()
+            msg = "登录已失效（Token 过期），请重新登录 51PM" if e.code == 444 else "登录已失效（HTTP 401），请重新登录 51PM"
+            raise ClientError(
+                "auth_required",
+                json.dumps(_auth_required_payload(msg)),
+            ) from e
         raise ClientError("http_error", detail, status=e.code) from e
     except URLError as e:
         reason = e.reason if hasattr(e, "reason") else e
@@ -133,15 +235,110 @@ def api_request(
     except TimeoutError as e:
         raise ClientError("request_failed", "timeout") from e
     try:
-        return json.loads(raw) if raw else {}
+        payload = json.loads(raw) if raw else {}
     except json.JSONDecodeError as e:
         raise ClientError("request_failed", "invalid json response") from e
+    if auth_sensitive and isinstance(payload, dict):
+        from auth_session import is_auth_business_code
+
+        if is_auth_business_code(payload.get("code")):
+            _invalidate_auth_cache()
+            msg = str(payload.get("msg") or "登录已失效，请重新登录 51PM")
+            raise ClientError(
+                "auth_required",
+                json.dumps(_auth_required_payload(msg)),
+            )
+    return payload
+
+
+def _filename_from_disposition(header: str) -> str:
+    import re
+
+    if not header:
+        return ""
+    match = re.search(r"filename\*=UTF-8''([^;]+)", header, re.I)
+    if match:
+        return match.group(1).strip()
+    match = re.search(r'filename="?([^";]+)"?', header, re.I)
+    return match.group(1).strip() if match else ""
+
+
+def download_binary(
+    method: str,
+    path: str,
+    params: dict[str, Any] | None = None,
+    token: str | None = None,
+    timeout: float = 180.0,
+    *,
+    output_name: str = "",
+) -> dict[str, Any]:
+    """Download binary response (Excel export) and save under scripts/exports/."""
+    cfg = load_config()
+    clean_params = {k: v for k, v in (params or {}).items() if v is not None and v != ""}
+    url = cfg["base_url"] + path
+    if clean_params and method.upper() == "GET":
+        url = url + "?" + urlencode(clean_params, doseq=True)
+    headers = {"Accept": "*/*"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = Request(url, headers=headers, method=method.upper())
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            data = resp.read()
+            content_type = resp.headers.get("Content-Type", "")
+            disposition = resp.headers.get("Content-Disposition", "")
+    except HTTPError as e:
+        detail = e.reason or str(e)
+        try:
+            if e.fp is not None:
+                detail = e.fp.read().decode("utf-8", errors="replace") or detail
+        except Exception:
+            pass
+        raise ClientError("http_error", detail, status=e.code) from e
+    except URLError as e:
+        raise ClientError("request_failed", str(e)) from e
+    except TimeoutError as e:
+        raise ClientError("request_failed", "timeout") from e
+
+    if not data:
+        raise ClientError("export_failed", "导出文件为空")
+
+    export_dir = Path(__file__).resolve().parent / "exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    file_name = (
+        str(output_name or "").strip()
+        or _filename_from_disposition(disposition)
+        or "export_estimate_hour.xls"
+    )
+    if not file_name.lower().endswith((".xls", ".xlsx")):
+        file_name += ".xls"
+    file_path = export_dir / file_name
+    file_path.write_bytes(data)
+    return {
+        "ok": True,
+        "file_name": file_name,
+        "file_path": str(file_path),
+        "relative_path": f"scripts/exports/{file_name}",
+        "size_bytes": len(data),
+        "content_type": content_type,
+        "message": "Excel 已导出，请将文件提供给用户下载",
+    }
 
 
 def _business_data(payload: Any) -> Any:
     """Unwrap GoFrame {code,msg,data} and nested Res.data when present."""
     if not isinstance(payload, dict):
         return None
+    if _AUTH_RUNTIME:
+        from auth_session import is_auth_business_code
+
+        if is_auth_business_code(payload.get("code")):
+            _invalidate_auth_cache()
+            msg = str(payload.get("msg") or "登录已失效，请重新登录 51PM")
+            raise ClientError(
+                "auth_required",
+                json.dumps(_auth_required_payload(msg)),
+            )
     if "code" in payload and payload.get("code") not in (0, "0", None, ""):
         msg = payload.get("msg") or f"business code {payload.get('code')}"
         raise ClientError("resolve_failed", str(msg))
@@ -167,21 +364,46 @@ def _extract_id(payload: Any, label: str) -> Any:
 
 
 def resolve_user_id(user_name: str) -> str:
-    payload = api_request(
-        "GET",
-        "/manage_api/user/get_user_info_by_nick_name",
-        {"nick_name": user_name},
-    )
+    try:
+        payload = _request_with_session(
+            "GET",
+            "/manage_api/user/get_user_info_by_nick_name",
+            {"nick_name": user_name},
+        )
+    except ClientError as e:
+        if e.error == "auth_required":
+            raise
+        detail = str(e.detail or "")
+        if "用户不存在" in detail:
+            raise ClientError(
+                "resolve_failed",
+                f"未找到昵称「{user_name}」对应的 51PM 用户；请先 search_user 确认准确昵称",
+            ) from e
+        raise
     return str(_extract_id(payload, f"user: {user_name}"))
 
 
 def resolve_dept_id(dept_name: str) -> int:
-    payload = api_request(
+    payload = _request_with_session(
         "GET",
         "/manage_api/menu_department/get_dept_info_by_dept_name",
         {"dept_name": dept_name},
     )
     return int(_extract_id(payload, f"dept: {dept_name}"))
+
+
+def _fetch_flat_departments() -> list[dict[str, Any]]:
+    from team_scope import flatten_department_tree
+
+    payload = _request_with_session(
+        "GET",
+        "/manage_api/menu_department/get_dept_list",
+        {},
+    )
+    data: Any = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(data, list):
+        data = []
+    return flatten_department_tree(data)
 
 
 def apply_name_resolution(params: dict[str, Any]) -> dict[str, Any]:
@@ -470,32 +692,6 @@ def build_upstream_query(
     return query
 
 
-def _extract_access_token(payload: Any) -> str:
-    data = _business_data(payload)
-    if not isinstance(data, dict):
-        raise ClientError("resolve_failed", "missing token_info in impersonate response")
-    token_info = data.get("token_info") or data.get("TokenInfo") or {}
-    if not isinstance(token_info, dict):
-        raise ClientError("resolve_failed", "missing token_info in impersonate response")
-    token = (
-        token_info.get("access_token")
-        or token_info.get("token")
-        or token_info.get("Token")
-    )
-    if not token:
-        raise ClientError("resolve_failed", "missing access_token in impersonate response")
-    return str(token)
-
-
-def impersonate(user_id: int | str) -> str:
-    payload = api_request(
-        "POST",
-        "/manage_api/user/impersonate_user",
-        json_body={"target_user_id": int(user_id)},
-    )
-    return _extract_access_token(payload)
-
-
 def _list_items_from_response(payload: Any) -> list[dict[str, Any]]:
     data = _business_data(payload)
     if isinstance(data, list):
@@ -526,7 +722,7 @@ def resolve_project_id(params: dict[str, Any]) -> str:
             "validation_error",
             "missing id/project_id or resolvable project_name/sj_num",
         )
-    payload = api_request(
+    payload = _request_with_session(
         "GET",
         "/manage_api/project/get_project_list",
         search,
@@ -777,12 +973,11 @@ OPERATIONS: dict[str, dict[str, Any]] = {
         "upstream_params": _PROJECT_LIST_UPSTREAM,
     },
     "get_my_projects": {
-        "description": "查询我参与的项目（可选 user_name 模拟指定用户）",
+        "description": "查询我参与的项目（当前登录用户；查他人项目请用 get_project_list）",
         "method": "GET",
         "path": "/manage_api/main_panel/get_project_list",
         "params": _MY_PROJECTS_PARAMS,
         "resolve_my_projects_filters": True,
-        "impersonate_if_user_name": True,
         "upstream_params": _MY_PROJECTS_UPSTREAM,
     },
     "get_project_info": {
@@ -854,6 +1049,7 @@ from operations_read_enhanced import (
     resolve_read_enhanced,
 )
 from operations_write import WRITE_OPERATIONS, resolve_write
+from operations_export import EXPORT_OPERATIONS, EXPORT_RESOLVE_MODES, resolve_export
 from skill_enhancements import (
     apply_period_natural_language,
     attach_skill_summary,
@@ -862,11 +1058,37 @@ from skill_enhancements import (
     inject_merged_items,
 )
 from write_protocol import execute_write, execute_write_batch, extract_write_control, pick_body
+from permission_policy import (
+    check_operation_access,
+    enrich_permission_context,
+    enforce_param_scope,
+    enforce_write_project_scope,
+    filter_operations_for_context,
+    filter_read_response_scope,
+    load_permission_context_from_session,
+    mask_tb_sensitive_fields,
+    permission_denied_payload,
+    actor_payload,
+)
+from need_input import build_need_input_payload, collect_missing_required
+from team_scope import apply_my_team_scope
+from auth_session import (
+    AuthIdentityRequired,
+    AuthRequired,
+    auth_status_payload,
+    build_ecp_login_url,
+    ensure_token,
+    invalidate_session,
+    load_auth_config,
+    reject_tampered_identity_params,
+    save_identity,
+)
 
 OPERATIONS.update(build_extended_operations(_PROJECT_LIST_PARAMS))
 OPERATIONS.update(DOMAIN_OPERATIONS)
 OPERATIONS.update(READ_ENHANCED_OPERATIONS)
 OPERATIONS.update(WRITE_OPERATIONS)
+OPERATIONS.update(EXPORT_OPERATIONS)
 
 _NOT_PROJECT_HINT_KEYS = (
     "not_project_id",
@@ -876,46 +1098,39 @@ _NOT_PROJECT_HINT_KEYS = (
 )
 
 
-def _validate_operation_params(meta: dict[str, Any], params: dict[str, Any]) -> None:
-    one_of = meta.get("required_one_of", [])
-    if one_of and not any(params.get(key) not in (None, "") for key in one_of):
-        raise ClientError(
-            "validation_error",
-            f"missing one of required params: {', '.join(one_of)}",
+def _validate_operation_params(
+    operation: str, meta: dict[str, Any], params: dict[str, Any]
+) -> None:
+    missing, one_of_failed = collect_missing_required(meta, params)
+    if not missing and not one_of_failed:
+        return
+    if one_of_failed:
+        payload = build_need_input_payload(
+            operation,
+            meta,
+            missing_fields=[],
+            provided=params,
+            one_of_groups=one_of_failed,
+            message="请向用户确认以下信息（任选其一或多项）",
         )
-    if meta.get("required_any"):
-        if not any(params.get(key) for key in meta.get("required", [])):
-            raise ClientError(
-                "validation_error",
-                f"missing one of required params: {', '.join(meta['required'])}",
-            )
-    elif meta.get("required_any_not_project"):
-        if not any(params.get(key) for key in _NOT_PROJECT_HINT_KEYS):
-            raise ClientError(
-                "validation_error",
-                f"missing one of not-project params: {', '.join(_NOT_PROJECT_HINT_KEYS)}",
-            )
-    elif meta.get("required_any_project"):
-        if not any(params.get(key) for key in _PROJECT_HINT_KEYS):
-            raise ClientError(
-                "validation_error",
-                f"missing one of project params: {', '.join(_PROJECT_HINT_KEYS)}",
-            )
-    elif not one_of:
-        for key in meta.get("required", []):
-            if params.get(key) in (None, ""):
-                raise ClientError("validation_error", f"missing required param: {key}")
-    skip_required = set(one_of)
-    for key in meta.get("required", []):
-        if key in skip_required:
-            continue
-        if params.get(key) in (None, ""):
-            raise ClientError("validation_error", f"missing required param: {key}")
+    else:
+        payload = build_need_input_payload(
+            operation,
+            meta,
+            missing_fields=missing,
+            provided=params,
+        )
+    raise ClientError("need_input", json.dumps(payload, ensure_ascii=False))
 
 
-def list_operations(grouped: bool = False) -> Any:
+def list_operations(grouped: bool = False, ctx: Any = None) -> Any:
+    operations = OPERATIONS
+    denied_meta: list[dict[str, str]] = []
+    if ctx is not None:
+        allowed_names, denied_meta = filter_operations_for_context(OPERATIONS, ctx)
+        operations = {k: v for k, v in OPERATIONS.items() if k in allowed_names}
     items = []
-    for name, meta in OPERATIONS.items():
+    for name, meta in operations.items():
         group = infer_operation_group(name, meta)
         entry: dict[str, Any] = {
             "name": name,
@@ -926,12 +1141,94 @@ def list_operations(grouped: bool = False) -> Any:
         if meta.get("write"):
             entry["write"] = True
         items.append(entry)
+    if ctx is not None and not grouped:
+        payload: dict[str, Any] = {
+            "actor": actor_payload(ctx),
+            "operations": items,
+        }
+        if denied_meta:
+            payload["denied_operations"] = denied_meta
+        return payload
     if not grouped:
         return items
     buckets: dict[str, list[dict[str, Any]]] = {}
     for item in items:
         buckets.setdefault(item["group"], []).append(item)
+    if ctx is not None:
+        result: dict[str, Any] = {
+            "actor": actor_payload(ctx),
+            "groups": buckets,
+        }
+        if denied_meta:
+            result["denied_operations"] = denied_meta
+        return result
     return buckets
+
+
+def _resolve_permission_context(params: dict[str, Any]) -> Any:
+    work = dict(params)
+    reject_tampered_identity_params(work)
+
+    file_cfg = _load_file_config()
+    auth_cfg = load_auth_config(file_cfg)
+    _set_auth_runtime(auth_cfg)
+
+    try:
+        session = ensure_token(
+            auth_cfg,
+            api_request=api_request,
+        )
+    except AuthRequired as e:
+        invalidate_session(auth_cfg)
+        raise ClientError("auth_required", json.dumps(e.to_payload(), ensure_ascii=False))
+    except AuthIdentityRequired as e:
+        raise ClientError("identity_required", json.dumps(e.to_payload(), ensure_ascii=False))
+    _set_auth_runtime(auth_cfg, str(session["access_token"]))
+    user_info = session.get("user_info") or {}
+    nick_fallback = str(user_info.get("nick_name") or "")
+    ctx = load_permission_context_from_session(
+        user_info=user_info,
+        access_token=str(session["access_token"]),
+        resolve_user_id=resolve_user_id,
+        nick_name_fallback=nick_fallback,
+    )
+    enrich_permission_context(
+        ctx,
+        api_request=api_request,
+        list_items=_list_items_from_response,
+        fetch_flat_departments=_fetch_flat_departments,
+    )
+    return ctx, ctx.nick_name
+
+
+def run_auth_command(action: str, params: dict[str, Any]) -> Any:
+    file_cfg = _load_file_config()
+    auth_cfg = load_auth_config(file_cfg)
+
+    if action == "save-identity":
+        union_id = str(params.get("union_id") or params.get("feishu_union_id") or "")
+        email = str(params.get("email") or params.get("feishu_email") or "")
+        try:
+            saved = save_identity(union_id=union_id, email=email, source="agent")
+        except ValueError as e:
+            raise ClientError("auth_error", str(e)) from e
+        return {
+            "ok": True,
+            "identity": saved,
+            "message": "身份已保存，请重试原业务命令",
+        }
+
+    if action == "status":
+        return auth_status_payload(
+            auth_cfg,
+            api_request=api_request,
+        )
+
+    raise ClientError(
+        "auth_error",
+        "可用: auth --param action status | auth --param action save-identity "
+        "--param union_id on_xxx [--param email user@example.com]",
+    )
 
 
 def _should_fetch_all(params: dict[str, Any], meta: dict[str, Any]) -> bool:
@@ -948,9 +1245,17 @@ def _execute_operation(
     query: dict[str, Any],
     token: str | None,
     fetch_all: bool,
+    *,
+    auth_sensitive: bool = False,
 ) -> Any:
     if not fetch_all or not meta.get("paginated", True):
-        return api_request(meta["method"], meta["path"], query, token=token)
+        return api_request(
+            meta["method"],
+            meta["path"],
+            query,
+            token=token,
+            auth_sensitive=auth_sensitive,
+        )
 
     all_items: list[Any] = []
     last_payload: Any = None
@@ -960,7 +1265,13 @@ def _execute_operation(
         page_query = dict(query)
         page_query["page"] = page
         page_query["limit"] = limit
-        payload = api_request(meta["method"], meta["path"], page_query, token=token)
+        payload = api_request(
+            meta["method"],
+            meta["path"],
+            page_query,
+            token=token,
+            auth_sensitive=auth_sensitive,
+        )
         last_payload = payload
         items, total = extract_page_items(payload)
         if not items:
@@ -980,104 +1291,191 @@ def run_operation(name: str, params: dict[str, Any]) -> Any:
     if name not in OPERATIONS:
         raise ClientError("unknown_operation", name)
     meta = OPERATIONS[name]
-    _validate_operation_params(meta, params)
-    if meta.get("write"):
-        work_params, control = extract_write_control(dict(params))
-        resolve_mode = meta.get("write_resolve_mode")
-        resolved = resolve_write(resolve_mode, work_params) if resolve_mode else work_params
-        batch_ids = resolved.pop("_batch_ids", None)
-        body_keys = meta.get("body_params", [])
-        if batch_ids and not control.confirm and not control.force:
-            bodies = []
-            for eid in batch_ids:
-                item = dict(resolved)
-                item["id"] = eid
-                bodies.append(pick_body(item, body_keys))
-            return execute_write_batch(name, meta, bodies, control, None, api_request)
-        body = pick_body(resolved, body_keys)
-        return execute_write(name, meta, body, control, None, api_request)
-    resolved = dict(params)
-    summarize = _should_summarize(resolved, meta)
-    fetch_all = _should_fetch_all(resolved, meta)
-    resolved = apply_period_natural_language(resolved)
-    if meta.get("resolve_names"):
-        resolved = apply_name_resolution(resolved)
-    if meta.get("resolve_project_filters"):
-        resolved = apply_project_param_resolution(resolved)
-    if meta.get("resolve_my_projects_filters"):
-        resolved = apply_my_projects_param_resolution(resolved)
-    if meta.get("resolve_work_hour_filters"):
-        resolved = apply_work_hour_param_resolution(
-            resolved, project_target=meta.get("project_id_target", "ids")
-        )
-    resolve_mode = meta.get("resolve_mode")
-    if resolve_mode:
-        if resolve_mode in READ_ENHANCED_RESOLVE_MODES:
-            resolved = resolve_read_enhanced(resolve_mode, resolved)
-        elif resolve_mode in DOMAIN_RESOLVE_MODES:
-            resolved = resolve_domains(resolve_mode, resolved)
-        else:
-            resolved = resolve_extended(resolve_mode, resolved)
-    if meta.get("resolve_project_info_aliases"):
-        resolved = _apply_field_aliases(
+    work_params = dict(params)
+    team_scope_meta: dict[str, Any] | None = None
+    try:
+        ctx, _act_as = _resolve_permission_context(work_params)
+        token = ctx.token if ctx else None
+        if ctx is not None:
+            work_params, team_scope_meta = apply_my_team_scope(
+                work_params,
+                user_id=ctx.user_id,
+                fallback_dept_id=ctx.dept_id,
+                fetch_departments=_fetch_flat_departments,
+            )
+
+        _validate_operation_params(name, meta, work_params)
+        access: Any = None
+        if ctx is not None:
+            access = check_operation_access(name, meta, ctx)
+            if not access.allowed:
+                raise ClientError(
+                    "permission_denied",
+                    json.dumps(
+                        permission_denied_payload(
+                            access.reason,
+                            operation=name,
+                            role=ctx.role,
+                        ),
+                        ensure_ascii=False,
+                    ),
+                )
+        if meta.get("write"):
+            wparams, control = extract_write_control(dict(work_params))
+            resolve_mode = meta.get("write_resolve_mode")
+            resolved = resolve_write(resolve_mode, wparams) if resolve_mode else wparams
+            batch_ids = resolved.pop("_batch_ids", None)
+            body_keys = meta.get("body_params", [])
+            if batch_ids and not control.confirm and not control.force:
+                bodies = []
+                for eid in batch_ids:
+                    item = dict(resolved)
+                    item["id"] = eid
+                    bodies.append(pick_body(item, body_keys))
+                return execute_write_batch(
+                    name, meta, bodies, control, token, api_request
+                )
+            body = pick_body(resolved, body_keys)
+            if ctx is not None:
+                enforce_write_project_scope(body, ctx)
+            return execute_write(name, meta, body, control, token, api_request)
+        resolved = dict(work_params)
+        summarize = _should_summarize(resolved, meta)
+        fetch_all = _should_fetch_all(resolved, meta)
+        resolved = apply_period_natural_language(resolved)
+        if meta.get("resolve_names"):
+            resolved = apply_name_resolution(resolved)
+        if meta.get("resolve_project_filters"):
+            resolved = apply_project_param_resolution(resolved)
+        if meta.get("resolve_my_projects_filters"):
+            resolved = apply_my_projects_param_resolution(resolved)
+        if meta.get("resolve_work_hour_filters"):
+            resolved = apply_work_hour_param_resolution(
+                resolved, project_target=meta.get("project_id_target", "ids")
+            )
+        resolve_mode = meta.get("resolve_mode")
+        if resolve_mode:
+            if resolve_mode in EXPORT_RESOLVE_MODES:
+                resolved = resolve_export(resolve_mode, resolved)
+            elif resolve_mode in READ_ENHANCED_RESOLVE_MODES:
+                resolved = resolve_read_enhanced(resolve_mode, resolved)
+            elif resolve_mode in DOMAIN_RESOLVE_MODES:
+                resolved = resolve_domains(resolve_mode, resolved)
+            else:
+                resolved = resolve_extended(resolve_mode, resolved)
+        if name == "get_task_list" and ctx is not None:
+            if resolved.get("assigned_to_me"):
+                resolved["assigned_to"] = [int(ctx.user_id)]
+            resolved.pop("assigned_to_me", None)
+            resolved.pop("done_by_me", None)
+        if name == "get_project_demand_list" and ctx is not None:
+            if resolved.get("assigned_to_me") and not resolved.get("assigned_to"):
+                resolved["assigned_to"] = int(ctx.user_id)
+            resolved.pop("assigned_to_me", None)
+        if meta.get("resolve_project_info_aliases"):
+            resolved = _apply_field_aliases(
+                resolved,
+                {
+                    "project_name": ("name",),
+                    "sj_num": ("opportunity_no", "business_no"),
+                },
+            )
+            if resolved.get("name") and not resolved.get("project_name"):
+                resolved["project_name"] = resolved.pop("name")
+        token = ctx.token if ctx else token
+        if meta.get("resolve_project_id"):
+            resolved["id"] = resolve_project_id(resolved)
+            resolved.pop("project_id", None)
+            resolved.pop("project_name", None)
+            resolved.pop("name", None)
+            resolved.pop("sj_num", None)
+            resolved.pop("opportunity_no", None)
+            resolved.pop("business_no", None)
+        project_id_field = meta.get("resolve_project_id_field")
+        if project_id_field and not resolved.get(project_id_field):
+            resolved[project_id_field] = resolve_project_id(resolved)
+            resolved.pop("project_name", None)
+            resolved.pop("name", None)
+            resolved.pop("sj_num", None)
+            resolved.pop("opportunity_no", None)
+            resolved.pop("business_no", None)
+        if not resolved.get("id") and resolved.get("moment_id"):
+            resolved["id"] = resolved.pop("moment_id")
+        if not resolved.get("id") and resolved.get("bug_id"):
+            resolved["id"] = resolved.pop("bug_id")
+        if not resolved.get("id") and resolved.get("publish_id"):
+            resolved["id"] = resolved.pop("publish_id")
+        if not resolved.get("id") and resolved.get("task_id"):
+            resolved["id"] = resolved.pop("task_id")
+        for alias in meta.get("id_aliases", ()):
+            if not resolved.get(alias) and resolved.get("id"):
+                resolved[alias] = resolved["id"]
+            elif not resolved.get("id") and resolved.get(alias):
+                resolved["id"] = resolved.pop(alias)
+        if ctx is not None and access is not None:
+            enforce_param_scope(name, resolved, ctx, access)
+        if resolved.get("cost_type") and not resolved.get("type"):
+            resolved["type"] = resolved.pop("cost_type")
+        output_name = str(resolved.pop("output_name", "") or "").strip()
+        if meta.get("binary_export"):
+            query = build_upstream_query(
+                resolved,
+                meta["upstream_params"],
+                meta.get("array_params", []),
+            )
+            result = download_binary(
+                meta["method"],
+                meta["path"],
+                query,
+                token=token,
+                output_name=output_name,
+            )
+            if ctx:
+                result["actor"] = actor_payload(ctx)
+            return result
+        if "page" not in resolved or resolved["page"] in (None, ""):
+            resolved["page"] = 1
+        if (resolved.get("limit") in (None, "")) and resolved.get("page_size") not in (
+            None,
+            "",
+        ):
+            resolved["limit"] = resolved["page_size"]
+        if "limit" not in resolved or resolved["limit"] in (None, ""):
+            resolved["limit"] = meta.get("default_limit", 500)
+        resolved.pop("page_size", None)
+        query = build_upstream_query(
             resolved,
-            {
-                "project_name": ("name",),
-                "sj_num": ("opportunity_no", "business_no"),
-            },
+            meta["upstream_params"],
+            meta.get("array_params", []),
         )
-        if resolved.get("name") and not resolved.get("project_name"):
-            resolved["project_name"] = resolved.pop("name")
-    token: str | None = None
-    if meta.get("impersonate_if_user_name"):
-        user_name = resolved.pop("user_name", None)
-        if user_name:
-            token = impersonate(resolve_user_id(str(user_name)))
-    if meta.get("resolve_project_id"):
-        resolved["id"] = resolve_project_id(resolved)
-        resolved.pop("project_id", None)
-        resolved.pop("project_name", None)
-        resolved.pop("name", None)
-        resolved.pop("sj_num", None)
-        resolved.pop("opportunity_no", None)
-        resolved.pop("business_no", None)
-    project_id_field = meta.get("resolve_project_id_field")
-    if project_id_field and not resolved.get(project_id_field):
-        resolved[project_id_field] = resolve_project_id(resolved)
-        resolved.pop("project_name", None)
-        resolved.pop("name", None)
-        resolved.pop("sj_num", None)
-        resolved.pop("opportunity_no", None)
-        resolved.pop("business_no", None)
-    if not resolved.get("id") and resolved.get("moment_id"):
-        resolved["id"] = resolved.pop("moment_id")
-    if not resolved.get("id") and resolved.get("bug_id"):
-        resolved["id"] = resolved.pop("bug_id")
-    if not resolved.get("id") and resolved.get("publish_id"):
-        resolved["id"] = resolved.pop("publish_id")
-    if not resolved.get("id") and resolved.get("task_id"):
-        resolved["id"] = resolved.pop("task_id")
-    for alias in meta.get("id_aliases", ()):
-        if not resolved.get(alias) and resolved.get("id"):
-            resolved[alias] = resolved["id"]
-        elif not resolved.get("id") and resolved.get(alias):
-            resolved["id"] = resolved.pop(alias)
-    if resolved.get("cost_type") and not resolved.get("type"):
-        resolved["type"] = resolved.pop("cost_type")
-    if "page" not in resolved or resolved["page"] in (None, ""):
-        resolved["page"] = 1
-    # 51PM PaginationReq uses `limit`; accept page_size as alias
-    if (resolved.get("limit") in (None, "")) and resolved.get("page_size") not in (None, ""):
-        resolved["limit"] = resolved["page_size"]
-    if "limit" not in resolved or resolved["limit"] in (None, ""):
-        resolved["limit"] = meta.get("default_limit", 500)
-    resolved.pop("page_size", None)
-    query = build_upstream_query(
-        resolved,
-        meta["upstream_params"],
-        meta.get("array_params", []),
-    )
-    return attach_skill_summary(name, _execute_operation(meta, query, token, fetch_all), summarize)
+        auth_sensitive = ctx is not None
+        result = attach_skill_summary(
+            name,
+            _execute_operation(meta, query, token, fetch_all, auth_sensitive=auth_sensitive),
+            summarize,
+        )
+        if ctx is not None and access is not None:
+            result = filter_read_response_scope(
+                result,
+                ctx,
+                access,
+                operation=name,
+            )
+        if ctx is not None and access is not None and access.mask_tb_fields:
+            result = mask_tb_sensitive_fields(result)
+        if ctx:
+            if isinstance(result, dict):
+                result.setdefault("actor", actor_payload(ctx))
+            else:
+                result = {
+                    "data": result,
+                    "actor": actor_payload(ctx),
+                }
+        if team_scope_meta and isinstance(result, dict):
+            result["team_scope"] = team_scope_meta
+        return result
+    finally:
+        _clear_auth_runtime()
 
 
 def _should_summarize(params: dict[str, Any], meta: dict[str, Any]) -> bool:
@@ -1105,10 +1503,31 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     try:
+        param_map = {k: v for k, v in args.param}
+
+        if args.operation == "auth":
+            auth_params = dict(param_map)
+            auth_action = auth_params.pop("action", None) or auth_params.pop("subcommand", None)
+            if not auth_action:
+                raise ClientError(
+                    "validation_error",
+                    "auth 用法: auth --param action status | "
+                    "auth --param action save-identity --param union_id on_xxx",
+                )
+            print(json.dumps(run_auth_command(str(auth_action), auth_params), ensure_ascii=False))
+            return 0
+
+        reject_tampered_identity_params(param_map)
+        ctx = None
+        try:
+            ctx, _actor = _resolve_permission_context(param_map)
+        except ClientError as e:
+            if e.error not in ("auth_required", "identity_required") or args.list_ops or args.list_ops_grouped:
+                raise
         if args.list_ops or args.list_ops_grouped:
             print(
                 json.dumps(
-                    list_operations(grouped=args.list_ops_grouped),
+                    list_operations(grouped=args.list_ops_grouped, ctx=ctx),
                     ensure_ascii=False,
                     indent=2,
                 )
@@ -1119,7 +1538,7 @@ def main(argv: list[str] | None = None) -> int:
                 "validation_error",
                 "operation name required (or use --list-ops)",
             )
-        params = {k: v for k, v in args.param}
+        params = dict(param_map)
         if args.fetch_all:
             params["fetch_all"] = "1"
         if args.dry_run:
@@ -1135,7 +1554,14 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(error_payload("config_error", str(e)), ensure_ascii=False))
         return 1
     except ClientError as e:
-        print(json.dumps(error_payload(e.error, e.detail, e.status), ensure_ascii=False))
+        if e.error in ("auth_required", "need_input", "identity_required", "permission_denied"):
+            try:
+                payload = json.loads(e.detail)
+                print(json.dumps(payload, ensure_ascii=False))
+            except json.JSONDecodeError:
+                print(json.dumps(error_payload(e.error, e.detail, e.status), ensure_ascii=False))
+        else:
+            print(json.dumps(error_payload(e.error, e.detail, e.status), ensure_ascii=False))
         return 1
 
 

@@ -146,6 +146,14 @@ def build_dry_run_response(
     }
 
 
+def _signing_secret() -> str:
+    import api_client
+    import hashlib
+
+    cfg = api_client.load_config()
+    return hashlib.sha256(f"pm-skill-confirm:{cfg['base_url']}".encode()).hexdigest()
+
+
 def execute_write(
     operation: str,
     meta: dict[str, Any],
@@ -156,8 +164,7 @@ def execute_write(
 ) -> Any:
     import api_client
 
-    cfg = api_client.load_config()
-    secret = cfg["api_key"]
+    secret = _signing_secret()
 
     if control.force:
         validate_required_body(body, meta.get("body_required", []), operation)
@@ -218,8 +225,7 @@ def execute_write_batch(
     import api_client
     from skill_enhancements import build_agent_hints
 
-    cfg = api_client.load_config()
-    secret = cfg["api_key"]
+    secret = _signing_secret()
     items: list[dict[str, Any]] = []
     for body in bodies:
         summary = meta.get("preview_summary")

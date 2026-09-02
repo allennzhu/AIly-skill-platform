@@ -8,47 +8,36 @@ Aily Skill：对接 51PM 项目管理平台工时 API，用于查询工时并生
 .
 ├── SKILL.md
 ├── scripts/
-│   ├── api_client.py
+│   ├── api_client.py          # CLI 入口
+│   ├── auth_session.py        # union_id / token 鉴权
+│   ├── permission_policy.py   # 本地权限预检与结果过滤
+│   ├── operations_*.py        # 各域操作定义
 │   └── package_skill.py
 └── references/
-    └── api_docs.md
+    ├── api_docs.md
+    ├── permission_matrix.md
+    └── auth_flow_design.md
 ```
 
-## 在飞书 Aily 中配置凭证
+## 在飞书 Aily 中配置
 
-当前 Aily「编辑信息」只有名称/描述，**没有环境变量入口**。请用配置文件：
+1. 飞书智能体用 `user_access_token` 获取对话人 `union_id`，执行一次：
+   `python3 scripts/api_client.py auth --param action save-identity --param union_id on_xxx`
+2. 可选：复制 `scripts/config.example.json` 为 `scripts/config.json` 覆盖 `base_url` / `login_url`
+3. 打包：`python scripts/package_skill.py . ./output`
+4. 在 Aily 市场更新 `pm-platform-api.skill`
 
-1. 复制 `scripts/config.example.json` 为 `scripts/config.json`
-2. 填入真实 `base_url` / `api_key`
-3. 重新打包：`python scripts/package_skill.py . ./output`
-4. 在 Aily 市场 → 技能 → 我创建的 → 项目管理平台API → **更新技能文件**，上传新的 `pm-platform-api.skill`
-
-本地调试仍可用环境变量（优先级高于 config.json）。
-
-`scripts/config.json` 含 Token，已加入 `.gitignore`，不要提交到 Git。
+`scripts/.feishu_identity.json` 与 `scripts/config.json` 已加入 `.gitignore`。
 
 ## 本地使用
 
 ```bash
-pip install -r requirements-dev.txt
+python scripts/api_client.py auth --param action save-identity --param union_id on_xxx
 
-# Windows PowerShell
-$env:PM_PLATFORM_BASE_URL="https://your-pm-host"
-$env:PM_PLATFORM_AUTH_TYPE="api_key"
-$env:PM_PLATFORM_API_KEY="your_token"
-
-python scripts/api_client.py --list-ops
-
-python scripts/api_client.py get_work_hours `
-  --param start_date 2026-08-03 `
-  --param end_date 2026-08-06 `
+python scripts/api_client.py get_work_hours \
+  --param start_date 2026-08-03 \
+  --param end_date 2026-08-06 \
   --param user_name 张三
-```
-
-## 测试
-
-```bash
-pytest tests/ -v
 ```
 
 ## 打包与部署

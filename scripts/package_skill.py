@@ -33,6 +33,7 @@ def package_skill(src_dir: Path, out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{name}.skill"
     include_dirs = ["scripts", "references"]
+    exclude_names = {"config.json", ".feishu_identity.json"}
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.write(skill_md, arcname="SKILL.md")
         for d in include_dirs:
@@ -43,6 +44,8 @@ def package_skill(src_dir: Path, out_dir: Path) -> Path:
                 if not path.is_file():
                     continue
                 if "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}:
+                    continue
+                if path.name in exclude_names:
                     continue
                 zf.write(
                     path,

@@ -114,6 +114,7 @@ def infer_operation_group(name: str, meta: dict[str, Any] | None = None) -> str:
     if meta and meta.get("group"):
         return str(meta["group"])
     rules: list[tuple[tuple[str, ...], str]] = [
+        (("export_estimate",), "工时导出"),
         (("not_project",), "非项目"),
         (("outsource", "supplier"), "外包供应商"),
         (("work_hour", "get_work_hours", "all_times"), "工时"),

@@ -192,6 +192,23 @@ def _resolve_user_search(params: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _resolve_dept_members(params: dict[str, Any]) -> dict[str, Any]:
+    import api_client
+
+    out = dict(params)
+    dept_name = out.pop("dept_name", None)
+    if dept_name and not out.get("dept_id"):
+        out["dept_id"] = api_client.resolve_dept_id(str(dept_name))
+    if out.get("dept_id") not in (None, ""):
+        try:
+            out["dept_id"] = int(out["dept_id"])
+        except (TypeError, ValueError):
+            pass
+    if out.get("get_all") in (None, ""):
+        out["get_all"] = 1
+    return out
+
+
 def resolve_read_enhanced(mode: str, params: dict[str, Any]) -> dict[str, Any]:
     import api_client
 
@@ -205,6 +222,7 @@ def resolve_read_enhanced(mode: str, params: dict[str, Any]) -> dict[str, Any]:
         "publish_apply": _resolve_publish_apply,
         "outsource_dimension": _resolve_outsource_dimension,
         "user_search": _resolve_user_search,
+        "dept_members": _resolve_dept_members,
         "sj_num_only": _resolve_sj_num_only,
     }
     handler = handlers.get(mode)
@@ -310,6 +328,27 @@ READ_ENHANCED_OPERATIONS: dict[str, dict[str, Any]] = {
         "group": "人员部门",
         "params": ["page", "limit", "page_size"],
         "upstream_params": ["page", "limit"],
+        "default_limit": 500,
+    },
+    "get_dept_members": {
+        "description": "按部门获取成员列表（含子部门，由后端 GetAllDeptIds 展开）",
+        "method": "GET",
+        "path": "/manage_api/user/get_user_list",
+        "group": "人员部门",
+        "params": [
+            "dept_id",
+            "dept_name",
+            "my_team_scope",
+            "page",
+            "limit",
+            "page_size",
+            "get_all",
+            "contain_leave",
+            "fetch_all",
+        ],
+        "required_one_of": ["dept_id", "dept_name", "my_team_scope"],
+        "resolve_mode": "dept_members",
+        "upstream_params": ["dept_id", "page", "limit", "get_all", "contain_leave"],
         "default_limit": 500,
     },
     "get_user_project": {
@@ -598,6 +637,7 @@ READ_ENHANCED_RESOLVE_MODES = frozenset(
         "publish_apply",
         "outsource_dimension",
         "user_search",
+        "dept_members",
         "sj_num_only",
     }
 )

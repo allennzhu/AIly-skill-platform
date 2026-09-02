@@ -1,6 +1,47 @@
 # 51PM 平台 API 参考
 
-供 Aily 查阅。认证：环境变量 `PM_PLATFORM_BASE_URL`、`PM_PLATFORM_AUTH_TYPE=api_key`、`PM_PLATFORM_API_KEY`；请求头 `Authorization: Bearer {token}`。
+供 Aily 查阅。
+
+## 鉴权架构
+
+| 步骤 | 说明 |
+|------|------|
+| 1 | 飞书智能体：`user_access_token` → 飞书 API → `union_id` / 邮箱 |
+| 2 | `auth --param action save-identity` → 写入 `.feishu_identity.json` |
+| 3 | `GET /manage_api/skill_auth/token?feishu_union_id=...`（免鉴权）取 Bearer Token |
+| 4 | 无 token → `auth_required`，用户登录 :771 后重试 |
+
+请求头：`Authorization: Bearer {access_token}`。
+
+## 操作：export_estimate_hour_by_project
+
+按项目/部门/日期导出全量工时明细 Excel（项目任务 + 非项目任务）。
+
+| 项 | 值 |
+|----|-----|
+| CLI 操作名 | `export_estimate_hour_by_project` |
+| HTTP | `GET` |
+| 路径 | `/manage_api/data_export/export_estimate_hour_for_cd` |
+| 权限 | **服务端鉴权**（需 Bearer Token；与网页「全量工时导出」同一接口） |
+| 输出 | 保存到 `scripts/exports/*.xls`，JSON 返回 `file_path` |
+
+### 参数
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `start_date` | 是 | 开始日期 YYYY-MM-DD |
+| `end_date` | 是 | 结束日期 YYYY-MM-DD |
+| `project_id` / `project_name` / `sj_num` | 否 | 按项目筛选（可多项目） |
+| `dept_id` / `dept_name` | 否 | 按部门筛选 |
+| `output_name` | 否 | 自定义导出文件名 |
+
+### CLI 示例
+
+```bash
+python3 scripts/api_client.py export_estimate_hour_by_project \
+  --param start_date 2026-08-01 --param end_date 2026-08-31 \
+  --param project_name 某某展厅
+```
 
 ## 操作：get_work_hours
 
@@ -201,14 +242,12 @@ python3 scripts/api_client.py get_project_list --param kaigong_start 2026-01-01 
 
 | 用途 | 方法 | 路径 | Body/参数 |
 |------|------|------|-----------|
-| 模拟用户登录 | POST | `/manage_api/user/impersonate_user` | `target_user_id` |
 | 人名 → 用户 ID | GET | `/manage_api/user/get_user_info_by_nick_name` | `nick_name` |
 
 ### CLI 示例
 
 ```bash
 python3 scripts/api_client.py get_my_projects
-python3 scripts/api_client.py get_my_projects --param user_name 李四
 python3 scripts/api_client.py get_my_projects --param project_name 展厅 --param stage 制作中
 ```
 
@@ -448,7 +487,8 @@ python3 scripts/api_client.py get_work_hour_detail_list \
 
 | 操作 | 路径 | 说明 |
 |------|------|------|
-| `get_task_list` | `/manage_api/project_task/get_task_list` | 必填项目；`assignee_name`→`assigned_to` |
+| `get_task_list` | `/manage_api/task/get_task_list` | **任务**列表；`assignee_name`/`user_name`→`assigned_to[]`；支持日期/部门/项目筛选 |
+| `get_project_demand_list` | `/manage_api/project_task/get_task_list` | **需求**列表（含需求树）；必填项目 |
 | `get_task_info` | `/manage_api/project_task/get_task_info` | `task_id`→`id` |
 
 ### 风险 / 复盘 / ECP / 交付形态
@@ -523,6 +563,8 @@ python3 scripts/api_client.py get_work_hour_detail_list \
 | `--list-ops-grouped` | 按模块分组列出操作（含 `group` 字段） |
 | `--fetch-all` | 列表接口自动翻页合并（或 `--param fetch_all 1`） |
 | `period` / `period_label` | 周期自然语言，自动解析为 `period_type`+`period_key` |
+| `auth --param action save-identity` | 保存飞书 union_id / 邮箱（智能体首次调用） |
+| `auth --param action status` | 查看当前登录状态 |
 | `--dry-run` | 写操作预览（写操作默认即为预览） |
 | `--confirm` | 写操作确认执行（须带 `confirm_token`） |
 
@@ -604,8 +646,18 @@ python3 scripts/api_client.py add_project_task_estimate \
 | `get_unconfirmed_work_hours` | `data_export/get_work_hour_detail_list` | 未确认工时，`confirm_status=0` |
 | `get_performance_list` | `data_export/get_performance_list` | 月度绩效列表 |
 | `get_performance_user` | `data_export/get_performance_user` | 用户绩效详情 |
-| `search_user` | `user/get_user_list` | 昵称搜用户 |
+| `search_user` | `user/get_user_list` | 昵称搜用户（必填 `nick_name`） |
 | `get_department_list` | `menu_department/get_dept_list` | 部门列表 |
+| `get_dept_members` | `user/get_user_list` | 按 `dept_id`/`dept_name`/`my_team_scope` 列部门成员（含子部门）；**无本地权限范围限制**（登录即可查任意部门） |
+
+`get_dept_members` 参数：
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `dept_id` / `dept_name` / `my_team_scope` | 三选一 | 部门 ID、部门名称、或 `my_team_scope 1` 解析负责部门 |
+| `get_all` | 否 | `1` 时后端返回全部（不分页） |
+| `contain_leave` | 否 | `1` 时包含离职人员 |
+| `fetch_all` | 否 | Skill 层自动翻页合并 |
 | `get_user_project` | `data_export/get_user_project` | 人员项目看板 |
 | `get_user_project_panel` | `data_export/get_user_project_panel` | 人员项目面板 |
 | `get_scene_group_project` | `data_export/get_scene_group_project` | 场景组项目看板 |

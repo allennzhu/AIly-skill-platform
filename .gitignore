@@ -6,5 +6,6 @@ __pycache__/
 output/
 *.skill
 scripts/config.json
-pm-fill-hours/scripts/config.json
+scripts/.feishu_identity.json
+scripts/exports/
 config.json

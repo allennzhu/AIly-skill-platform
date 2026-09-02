@@ -8,7 +8,106 @@ description: "对接项目管理平台 API。当用户提到工时/日报、项�
 
 通过本 Skill 调用 51PM 工时接口，获取原始 JSON 后由你完成汇总与工作总结。不要编造未返回的数据。
 
-## 可用操作
+## 执行纪律（最高优先级）
+
+### 鉴权流程
+
+```
+飞书智能体（首次）
+  → user_access_token → 飞书 API → union_id / 邮箱
+  → auth save-identity（永久保存）
+  → 重试业务命令
+
+Skill（每次业务）
+  → 读 .feishu_identity.json
+  → GET /skill_auth/token?feishu_union_id=...
+  ├─ 有 token → 调业务 API
+  └─ 无 token → auth_required → 用户登录 :771 → 重试
+```
+
+| 步骤 | Agent 动作 |
+|------|-----------|
+| 1 | `identity_required` 时：引导智能体执行 `auth save-identity`（**不是**调 lark-cli） |
+| 2 | 身份已保存后：**直接执行业务 CLI** |
+| 3 | `auth_required` → 发 `login_url`，用户登录后重试 |
+| 4 | **`permission_denied` → 立即终止**（见下节，禁止继续尝试） |
+
+### permission_denied = 立即终止（禁止继续思考）
+
+CLI 返回 `"error": "permission_denied"` 且 `"terminal": true` 时：
+
+1. **马上结束**当前任务，向用户说明：当前角色无权、缺少什么权限
+2. **禁止**以下一切行为：
+   - 换 `dept_name` / `user_name` / 日期再试
+   - 换另一个 operation「侧面查」
+   - `search_user` / `get_department_list` 探测后重试
+   - 全量拉取再本地筛选
+   - `skip_permission=1` 绕过
+   - 继续推理「有没有别的办法」
+
+**收到权限拒绝 = 对话内该需求的终点，不要多轮自救。**
+
+| 禁止 |
+|------|
+| 调 lark-cli / 飞书通讯录代替 save-identity |
+| `auth --param action set-token` / F12 手动 Token |
+| 业务命令传 `--param union_id` / `email` |
+| 读 `auth_session.py` 探索实现 |
+
+### 常见报错
+
+| 报错 | 含义 | 动作 |
+|------|------|------|
+| `identity_required` | 未 save-identity | 智能体先 save-identity，再重试业务 |
+| `auth_required` | 未登录 51PM | 发 login_url，登录后重试 |
+| `resolve_failed` | 昵称未找到 | 先 `search_user` 确认昵称 |
+
+### 端口说明
+
+| 地址 | 用途 |
+|------|------|
+| `http://51pm.51aes.com:771` | 网页端 |
+| `http://51pm.51aes.com:218` | API 后端（不是登录页） |
+| `auth_required.login_url` | OAuth 链接（发给用户点击） |
+
+### 鉴权路径
+
+```bash
+# 首次：智能体保存身份（union_id 来自飞书 API，不是 Skill 猜的）
+python3 scripts/api_client.py auth --param action save-identity --param union_id on_xxxxxxxx
+
+# 业务命令（自动读身份 + 查 token）
+python3 scripts/api_client.py get_task_list --param assignee_name 张三 ...
+
+# 若 auth_required → 发 login_url → 用户登录后重试
+```
+
+### 缺参数 → 问用户，不要猜
+
+CLI 缺必填参数时返回 `need_input`（含 `form` 字段），**直接把 form 里的问题发给用户**，收到回答后用 `--param` 重试：
+
+```json
+{
+  "error": "need_input",
+  "form": [
+    {"name": "start_date", "label": "开始日期", "hint": "格式 YYYY-MM-DD"},
+    {"name": "end_date", "label": "结束日期"}
+  ],
+  "next_step": "把 form 中的问题直接发给用户；收到回答后带 --param 重试同一条命令"
+}
+```
+
+示例（用户问「8月递交情况」但缺周期参数）：
+
+```bash
+# 第 1 次调用若返回 need_input → 问用户确认日期范围
+python3 scripts/api_client.py get_publish_list \
+  --param start_date 2026-08-01 --param end_date 2026-08-31
+```
+
+### 登录失效 → auth_required
+
+把 `login_url` 发给用户，登录后**重试原业务命令**（不要执行 auth 子命令）。
 
 使用 CLI：
 
@@ -19,7 +118,128 @@ python3 scripts/api_client.py get_work_hours --param KEY VALUE
 python3 scripts/api_client.py get_bug_list --fetch-all --param project_name 某某展厅
 ```
 
-接口细节见 `references/api_docs.md`。`--list-ops-grouped` 按业务模块分组列出全部 **130** 个操作（含 **22** 个写操作）。
+接口细节见 `references/api_docs.md`。`--list-ops-grouped` 按业务模块分组列出全部 **131** 个操作（含 **22** 个写操作）。
+
+## 权限与身份（必读）
+
+### 权限怎么控制？
+
+**后端未做业务鉴权时，Skill 在每次调 API 前本地强制执行 `references/permission_matrix.md` 规则。**
+
+| 层级 | 做法 |
+|------|------|
+| 身份 | 登录用户的 Bearer Token（`/skill_auth/token` 按 union_id 换取） |
+| 操作级 | `check_operation_access` — 角色能否调用该 operation（组织级模块等直接拒绝） |
+| 参数级 | `enforce_param_scope` — 请求里显式指定的人/部门/项目是否越界（越界 → `permission_denied`） |
+| **结果级** | `filter_read_response_scope` — **接口可调用**，自动裁剪到可见用户/项目（如 TB 查 BUG 列表） |
+| 写入级 | `enforce_write_project_scope` — 写操作目标项目是否允许 |
+| TB 脱敏 | `mask_tb_sensitive_fields` — 响应中隐藏实际工时/成本字段 |
+
+**TB/工程成员等**：多数读接口**不是禁止调用**，而是「能调 + 结果按权限过滤 + TB 额外字段脱敏」。例如 TB 可查**自己参与/负责**项目的 `get_project_info`；列表类接口未带项目参数时，返回行会自动过滤。
+
+返回 `permission_denied`（`terminal: true`）时 **立即终止**——这主要针对**操作级拒绝**或**参数里明确越界**（如查无权部门/他人/项目），不是结果过滤后的空数据。
+
+详见 `references/permission_matrix.md`。角色 id / 名称 / 平台描述以 **`references/role_catalog.md`**（`dev_menu_root`）为准；响应 `actor` 含 `role_id`、`role_title`、`role_label`。
+
+### GL ≠ 组员（勿混淆）
+
+| 代码 | 平台名称 | Agent 应如何称呼 |
+|------|----------|------------------|
+| **GL** | **四级负责人**（平台亦称 Builder负责人） | 使用 `actor.role_title` 或「四级负责人」 |
+| TA/DEV/SP/QA | 项目技术/开发组员等 | 才可称「组员」 |
+| `my_team_scope` | 查询范围参数 | 口语「我们组/组员」指**查谁的数据**，不是用户角色 |
+
+**禁止**把 `role=GL` 的用户描述成「组员」或「GL·组员」。权限拒绝时看 `actor.role_label` 与 `detail`；GL（四级负责人）被拒通常是因为**目标部门不在其负责/所在部门范围内**。
+
+### 查询范围纪律（必守）
+
+**用户限定了范围 → 必须把条件作为参数传给接口，禁止「先查全量再在本地筛」。**
+
+| 用户说的范围 | 必须传入的参数（示例） |
+|-------------|----------------------|
+| 某人（邱野） | `user_name` / `assignee_name` |
+| 某部门 | `dept_name` |
+| **我们组 / 我团队 / 组员**（未指定部门） | `my_team_scope 1`（见下节） |
+| 某项目 | `project_name` / `sj_num` |
+| 某日期 | `start_date` + `end_date` |
+| 我的任务 | `assigned_to_me 1`（任务列表） |
+
+### 「我们组 / 我团队」范围（负责人含子部门）
+
+用户说「我们组」「我团队」「组员」且**未指定具体部门或人名**时，传 `my_team_scope 1`：
+
+```bash
+python3 scripts/api_client.py get_work_hours \
+  --param my_team_scope 1 \
+  --param start_date 2026-09-01 --param end_date 2026-09-07
+```
+
+Skill 会：
+
+1. `get_user_info` → 当前 `user_id`、`dept_id`
+2. `get_department_list` → 找 `leader_id == user_id` 的部门（负责人）
+3. **若是负责人** → 用其负责的部门作为 `dept_id`（父部门）
+4. **若不是负责人** → 回退到登录用户自己的 `dept_id`
+5. 将 `dept_id` 传给业务 API；**子部门人员由 51PM `GetAllDeptIds` 在后端展开**
+
+**禁止**：先 `search_user` 枚举组员再逐个查；**禁止**本地按部门筛结果。查组员请用 `get_dept_members`（传 `dept_name` 或 `my_team_scope 1`）。
+
+```bash
+# 按部门名列成员（含子部门）
+python3 scripts/api_client.py get_dept_members --param dept_name 项目场景B
+
+# 我们组全体成员
+python3 scripts/api_client.py get_dept_members --param my_team_scope 1
+```
+
+**鉴权说明**：`get_dept_members` 与 `get_work_hours` 等**共用同一登录 Token**（`save-identity` + `/skill_auth/token`）。若工时等业务接口已成功，**禁止**向用户说「部门成员要另开浏览器登录」——除非 CLI 明确返回 `auth_required`。
+
+| CLI 返回 | 含义 | Agent 动作 |
+|----------|------|------------|
+| 成功 JSON | 名册已拉到 | 用成员列表核对未填报人员 |
+| `auth_required` | 整站未登录 | 发 `login_url`，登录后重试 |
+| `permission_denied` | 本地权限拒绝（本接口已无部门范围限制，少见） | 按 terminal 终止 |
+| `resolve_failed` | 部门名错误等 | 先 `get_department_list` 确认部门名 |
+| 空列表 `data: []` | 接口成功但该部门无成员/参数有误 | **如实说明**，不要编造登录问题 |
+
+若用户已明确 `dept_name` / `user_name`，**不要**再传 `my_team_scope`（显式范围优先）。
+
+返回 JSON 可能含 `team_scope` 字段，说明实际使用的部门范围。
+
+```bash
+# ✅ 正确：条件进 API
+python3 scripts/api_client.py get_task_list \
+  --param assignee_name 邱野 --param start_date 2026-09-01 --param end_date 2026-09-01
+
+# ❌ 禁止：不带人名查全量，再在回复里过滤
+python3 scripts/api_client.py get_task_list --param start_date 2026-09-01
+```
+
+**`--fetch-all` 仅用于**：用户已用参数限定范围后，需要合并该范围内的多页结果；**不得**用 fetch-all 代替人员/项目/日期筛选。
+
+`skill_summary` 只对 API 已返回的数据做统计摘要，**不会**代替传参筛选。
+
+### 鉴权说明
+
+身份由飞书智能体 `auth save-identity` 永久保存；Token 由服务端 `/skill_auth/token` 按 union_id 缓存。默认 API `http://51pm.51aes.com:218`。
+
+| 返回 | 处理 |
+|------|------|
+| `identity_required` | 智能体先 `auth save-identity`，再重试业务 |
+| `auth_required` | 发 `login_url` → 用户登录 → 重试原命令 |
+| `need_input` | 按 `form` 向用户提问后重试 |
+
+**注意**：`auth save-identity` 必须带 `--param union_id`，且会**先于**业务鉴权执行；不要用 Python 直接写身份文件绕过 CLI。
+
+### 负责人 ≠ 自动限权
+
+| 误解 | 实际行为 |
+|------|---------|
+| 我是负责人，只能看自己组 | **是**（本地校验）：`dept_name` 须在负责部门及子部门内 |
+| 查「场景A组」若不在我负责范围 | 返回 `permission_denied` |
+| `my_team_scope 1` | 解析为负责人部门，再经本地部门范围校验 |
+
+用户明确要查**别的组**且不在权限内 → 拒绝并说明；查**自己组** → `my_team_scope 1`。
 
 ## 意图 → 操作映射
 
@@ -33,6 +253,7 @@ python3 scripts/api_client.py get_bug_list --fetch-all --param project_name 某�
 | 查某项目下的工时列表 | `get_project_work_hours` | 单步；必须带项目（`project_name`/`sj_num`/`project_id`）；可带日期范围 | 按任务/人员列出花费明细 |
 | 工时数据总览（可按项目筛） | `get_work_hour_statistics` | 单步；必填日期；可带 `project_name`/`user_name`/`dept_name` | 总工时、项目/非项目占比、TOP5 等 |
 | 工时下钻明细（可按项目筛） | `get_work_hour_detail_list` | 单步；必填日期；可带项目/人员/部门/产出类型 | 逐条工时明细列表 |
+| **导出项目全量工时 Excel** | `export_estimate_hour_by_project` | 必填 `start_date`/`end_date`；可选 `project_name`/`dept_name`；需登录，权限由服务端判定 | 生成 Excel 文件路径 |
 | 项目健康度/体检 | `get_project_overview_*` | 单步；带 `project_name`/`sj_num`；按意图选子接口 | KPI、成本、质量、人员、风险等 |
 | 项目递交情况 | `get_project_overview_deliver` | 同项目全景 | 递交进度、延期、临时递交 |
 | QA 递交统计 | `get_qa_stat_publish` | 必填 `period_type`+`period_key`；可加部门/人 | 递交准时率、延期清单 |
@@ -43,7 +264,8 @@ python3 scripts/api_client.py get_bug_list --fetch-all --param project_name 某�
 | 部门产能/剩余工时 | `get_dept_capacity_panel` / `get_dept_left_hour_*` | 产能面板可带 `dept_name`+日期；下钻需 `dept_key`+`status` | 产能利用率、待消耗人天 |
 | 递交台账明细 | `get_publish_list` / `get_publish_info` | 可按 PM/状态/日期筛选 | 递交版本、是否超 TB、延期 |
 | 递交申请 | `get_apply_publish_list` | 可带 `project_name`、申请状态、日期 | 待审批/已审批申请 |
-| 项目任务/需求 | `get_task_list` / `get_task_info` | 列表必填项目；可 `assigned_to_me` | 未完成任务、指派人 |
+| 项目任务 | `get_task_list` / `get_task_info` | 任务接口；`assignee_name`/`user_name`→`assigned_to`；可 `assigned_to_me`、日期范围 | 未完成任务、指派人 |
+| 项目需求 | `get_project_demand_list` | 需求接口；**必填项目** | 需求树、混合列表 |
 | 全局风险面板 | `get_project_risk_panel` | 可按 PM/商机号/风险等级 | 高风险项目、未解决风险 |
 | 项目复盘 | `get_project_review_panel` | 可按项目/PM/测试/日期 | 复盘得分、待办、经验 |
 | ECP 项目动态 | `get_project_change_info` | 商机号+日期范围 | ECP 每日变更记录 |
@@ -63,7 +285,7 @@ python3 scripts/api_client.py get_bug_list --fetch-all --param project_name 某�
 | 登记任务工时 | `add_project_task_estimate` | **写** 两阶段；必填 `task_id`+`consumed`+`remark` | 填报项目任务花费 |
 | 未确认工时 | `get_unconfirmed_work_hours` | 本月默认；可 `--summarize` | 待确认工时清单 |
 | 月度绩效 | `get_performance_list` / `get_performance_user` | 必填日期范围 | 绩效审核进度/详情 |
-| 人员/部门 | `search_user` / `get_department_list` | 昵称搜索 | 解析 user_id/dept_id |
+| 人员/部门 | `search_user` / `get_department_list` / `get_dept_members` | 昵称搜索；按部门列成员（`get_dept_members` 无本地范围限制） | 解析 user_id/dept_id、组员名单 |
 | 人员项目看板 | `get_user_project` / `get_scene_group_project` | `type` 可用 开发/设计/项目经理 等 | 岗位负荷分布 |
 | 递交扩展 | `get_qa_reject_publish_list` / `get_bd_publish_list` / `get_publish_demand_pool` | 审批/BD/需求池 | 递交闭环 |
 | 字典常量 | `get_bug_const` / `get_publish_normal_const` / `get_project_moment_config_list` / `get_apply_demand_consts` | 写操作前预取 | 减少 type/status 猜测 |
@@ -286,6 +508,11 @@ python3 scripts/api_client.py get_work_hour_detail_list \
   --param end_date 2026-08-31 \
   --param project_name 某某展厅 \
   --param output_type 产出
+
+# 导出项目全量工时 Excel（需登录，权限由 51PM 服务端判定）
+python3 scripts/api_client.py export_estimate_hour_by_project \
+  --param start_date 2026-08-01 --param end_date 2026-08-31 \
+  --param project_name 某某展厅
 ```
 
 ### 项目健康度（`get_project_overview_*`）
@@ -365,10 +592,18 @@ python3 scripts/api_client.py get_apply_publish_list \
 ### 项目任务
 
 ```bash
+# 查任务（走 /manage_api/task/get_task_list，参数直接传给后端筛选）
+python3 scripts/api_client.py get_task_list \
+  --param assignee_name 张三 --param start_date 2026-09-01 --param end_date 2026-09-02
+
 python3 scripts/api_client.py get_task_list \
   --param project_name 某某展厅 --param assigned_to_me 1
 
 python3 scripts/api_client.py get_task_info --param task_id 999
+
+# 查需求树（走 /manage_api/project_task/get_task_list，需指定项目）
+python3 scripts/api_client.py get_project_demand_list \
+  --param project_name 某某展厅
 ```
 
 ### 风险 / 复盘 / ECP / 排期
