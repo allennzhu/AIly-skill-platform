@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Callable
 
 from operations_domains import _resolve_not_project_id_value
@@ -37,7 +37,9 @@ _CONFIRM_LABEL = {
     "ConfirmNotTaskEstimate": "非项目工时",
 }
 
-# 同一任务（同一填写人）只能有一条工时记录；已存在则必须改走 update
+# 同一任务同一天（同一填写人）只能有一条工时；跨天可各有一条；同日已存在则必须改走 update
+# 填报 date 还必须落在任务 start_date～end_date 内
+# 已确认 / 非当日历史工时不可 update（对齐 51PM）
 UNIQUE_TASK_ESTIMATE_OPS: dict[str, dict[str, Any]] = {
     "add_project_task_estimate": {
         "kind": "项目",
@@ -46,10 +48,28 @@ UNIQUE_TASK_ESTIMATE_OPS: dict[str, dict[str, Any]] = {
             "/manage_api/project_task_estimate/get_task_estimate_list",
             "/manage_api/project_task_estimate/get_estimate_list",
         ),
+        "task_info_path": "/manage_api/project_task/get_task_info",
     },
     "add_not_project_estimate": {
         "kind": "非项目",
         "update_operation": "update_not_project_estimate",
+        "list_paths": (
+            "/manage_api/project_not_task_estimate/get_task_estimate_list",
+        ),
+        "task_info_path": "/manage_api/project_not_task/get_task_info",
+    },
+}
+
+UPDATE_ESTIMATE_OPS: dict[str, dict[str, Any]] = {
+    "update_project_task_estimate": {
+        "kind": "项目",
+        "list_paths": (
+            "/manage_api/project_task_estimate/get_task_estimate_list",
+            "/manage_api/project_task_estimate/get_estimate_list",
+        ),
+    },
+    "update_not_project_estimate": {
+        "kind": "非项目",
         "list_paths": (
             "/manage_api/project_not_task_estimate/get_task_estimate_list",
         ),
@@ -90,24 +110,345 @@ def _estimate_items_from_payload(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _normalize_estimate_date(value: Any) -> str:
+    """Normalize API/CLI date values to YYYY-MM-DD for comparison."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    # "2026-09-03 00:00:00" / ISO → first 10 chars when looks like date
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[:10]
+    return text
+
+
+def _task_info_from_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    data = payload.get("data", payload)
+    if not isinstance(data, dict):
+        return {}
+    info = data.get("info")
+    if isinstance(info, dict):
+        return info
+    return data
+
+
+def fetch_task_date_range(
+    *,
+    task_info_path: str,
+    task_id: int,
+    token: str | None,
+    api_request_fn,
+) -> tuple[str, str] | None:
+    """Return (start_date, end_date) YYYY-MM-DD for task, or None if unavailable."""
+    import api_client
+
+    try:
+        payload = api_request_fn(
+            "GET",
+            task_info_path,
+            {"id": task_id},
+            token=token,
+        )
+    except (api_client.ClientError, OSError):
+        return None
+    info = _task_info_from_payload(payload)
+    start = _normalize_estimate_date(
+        info.get("start_date") or info.get("begin_date") or info.get("start_time")
+    )
+    end = _normalize_estimate_date(
+        info.get("end_date") or info.get("finish_date") or info.get("end_time")
+    )
+    if not start and not end:
+        return None
+    return start, end
+
+
+def enforce_estimate_date_in_task_range(
+    operation: str,
+    body: dict[str, Any],
+    *,
+    token: str | None,
+    api_request_fn,
+) -> None:
+    """Spend date must fall within the task's start_date～end_date (when known)."""
+    spec = UNIQUE_TASK_ESTIMATE_OPS.get(operation)
+    if not spec:
+        return
+    task_id = _parse_estimate_int(body.get("task_id"))
+    if task_id is None:
+        return
+    work_date = _normalize_estimate_date(body.get("date") or body.get("work_date"))
+    if not work_date:
+        work_date = date.today().isoformat()
+    path = str(spec.get("task_info_path") or "")
+    if not path:
+        return
+    span = fetch_task_date_range(
+        task_info_path=path,
+        task_id=task_id,
+        token=token,
+        api_request_fn=api_request_fn,
+    )
+    if not span:
+        return
+    start, end = span
+    # Partial bounds: only enforce sides we know
+    if start and work_date < start:
+        _raise_estimate_date_out_of_range(
+            operation=operation,
+            task_id=task_id,
+            work_date=work_date,
+            start=start,
+            end=end,
+            kind=str(spec["kind"]),
+        )
+    if end and work_date > end:
+        _raise_estimate_date_out_of_range(
+            operation=operation,
+            task_id=task_id,
+            work_date=work_date,
+            start=start,
+            end=end,
+            kind=str(spec["kind"]),
+        )
+
+
+def _raise_estimate_date_out_of_range(
+    *,
+    operation: str,
+    task_id: int,
+    work_date: str,
+    start: str,
+    end: str,
+    kind: str,
+) -> None:
+    import api_client
+
+    range_text = f"{start or '?'} ~ {end or '?'}"
+    payload = {
+        "error": "estimate_date_out_of_range",
+        "detail": (
+            f"该{kind}任务（task_id={task_id}）的时间范围是 {range_text}，"
+            f"不能在 {work_date} 填写花费。请改用范围内的日期，或换在该日期仍有效的任务。"
+        ),
+        "operation": operation,
+        "task_id": task_id,
+        "date": work_date,
+        "task_start_date": start or None,
+        "task_end_date": end or None,
+        "message": f"花费日期 {work_date} 不在任务时间范围 {range_text} 内",
+        "agent_instruction": (
+            "禁止强行 add。"
+            "向用户说明：只能在任务起止日期内填工时；"
+            "请换范围内的 date，或先确认任务周期后再填。"
+        ),
+        "next_step": "把任务时间范围告知用户，请用户改日期或换任务后重试",
+    }
+    raise api_client.ClientError(
+        "estimate_date_out_of_range",
+        json.dumps(payload, ensure_ascii=False),
+    )
+
+
+def _is_estimate_confirmed(status: Any) -> bool:
+    """confirm_status: 0=待确认；非 0（常为确认人 user_id）=已确认。"""
+    if status in (None, "", 0, "0", "待确认", "pending", "unconfirmed"):
+        return False
+    if status in (1, "1", "已确认", "confirmed"):
+        return True
+    try:
+        return int(status) != 0
+    except (TypeError, ValueError):
+        text = str(status).strip().lower()
+        return text not in ("0", "待确认", "pending", "unconfirmed")
+
+
+def _estimate_record_id(item: dict[str, Any]) -> int | None:
+    return _parse_estimate_int(
+        item.get("id")
+        or item.get("eid")
+        or item.get("estimate_id")
+        or item.get("work_hour_id")
+    )
+
+
+def _raise_estimate_immutable(
+    *,
+    error: str,
+    operation: str,
+    estimate_id: int,
+    kind: str,
+    work_date: str,
+    confirm_status: Any,
+    detail: str,
+    message: str,
+) -> None:
+    import api_client
+
+    payload = {
+        "error": error,
+        "detail": detail,
+        "operation": operation,
+        "estimate_id": estimate_id,
+        "date": work_date or None,
+        "confirm_status": confirm_status,
+        "message": message,
+        "agent_instruction": (
+            "禁止调用 update 修改该工时。"
+            "向用户说明：已确认或历史工时不可改；"
+            "若需调整，只能改当日且仍待确认的记录，或联系管理员/走开放日流程。"
+        ),
+        "next_step": "告知用户该记录不可修改，不要再次尝试 update",
+    }
+    raise api_client.ClientError(error, json.dumps(payload, ensure_ascii=False))
+
+
+def fetch_estimate_by_id(
+    *,
+    estimate_id: int,
+    list_paths: tuple[str, ...] | list[str],
+    task_id: int | None,
+    work_date: str,
+    token: str | None,
+    api_request_fn,
+) -> dict[str, Any] | None:
+    """Load one estimate row for update checks (by task list and/or my panel list)."""
+    import api_client
+
+    if task_id is not None:
+        for path in list_paths:
+            try:
+                payload = api_request_fn(
+                    "GET",
+                    path,
+                    {"task_id": task_id, "page": 1, "limit": 100},
+                    token=token,
+                )
+            except (api_client.ClientError, OSError):
+                continue
+            for item in _estimate_items_from_payload(payload):
+                if _estimate_record_id(item) == estimate_id:
+                    return item
+
+    # Fallback: my panel list (id field is eid), scoped by date when known
+    if work_date:
+        start = end = work_date
+    else:
+        end = date.today().isoformat()
+        start = (date.today() - timedelta(days=400)).isoformat()
+    try:
+        payload = api_request_fn(
+            "GET",
+            "/manage_api/main_panel/get_estimate_time_list",
+            {"start_date": start, "end_date": end},
+            token=token,
+        )
+    except (api_client.ClientError, OSError):
+        return None
+    items = _estimate_items_from_payload(payload)
+    if not items and isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, list):
+            items = [x for x in data if isinstance(x, dict)]
+    for item in items:
+        if _estimate_record_id(item) == estimate_id:
+            return item
+    return None
+
+
+def enforce_estimate_modifiable(
+    operation: str,
+    body: dict[str, Any],
+    *,
+    token: str | None,
+    api_request_fn,
+) -> None:
+    """Block update of confirmed or historical (non-today) estimates."""
+    spec = UPDATE_ESTIMATE_OPS.get(operation)
+    if not spec:
+        return
+    estimate_id = _parse_estimate_int(body.get("id") or body.get("estimate_id"))
+    if estimate_id is None:
+        return
+    task_id = _parse_estimate_int(body.get("task_id"))
+    work_date = _normalize_estimate_date(body.get("date") or body.get("work_date"))
+    existing = fetch_estimate_by_id(
+        estimate_id=estimate_id,
+        list_paths=spec["list_paths"],
+        task_id=task_id,
+        work_date=work_date,
+        token=token,
+        api_request_fn=api_request_fn,
+    )
+    if not existing:
+        return
+    kind = str(spec["kind"])
+    confirm_status = existing.get("confirm_status")
+    existing_date = _normalize_estimate_date(
+        existing.get("date") or existing.get("work_date") or existing.get("estimate_date")
+    ) or work_date
+    today = date.today().isoformat()
+
+    if _is_estimate_confirmed(confirm_status):
+        _raise_estimate_immutable(
+            error="estimate_confirmed_immutable",
+            operation=operation,
+            estimate_id=estimate_id,
+            kind=kind,
+            work_date=existing_date,
+            confirm_status=confirm_status,
+            detail=(
+                f"该{kind}工时（id={estimate_id}"
+                + (f"，日期 {existing_date}" if existing_date else "")
+                + "）已确认，不可修改。"
+            ),
+            message="已确认的工时不可修改",
+        )
+    if existing_date and existing_date != today:
+        _raise_estimate_immutable(
+            error="estimate_historical_immutable",
+            operation=operation,
+            estimate_id=estimate_id,
+            kind=kind,
+            work_date=existing_date,
+            confirm_status=confirm_status,
+            detail=(
+                f"该{kind}工时（id={estimate_id}，日期 {existing_date}）属于历史记录，"
+                f"仅允许修改当天（{today}）且仍待确认的工时。"
+            ),
+            message="历史工时不可修改",
+        )
+
+
 def find_existing_task_estimate(
     *,
     list_paths: tuple[str, ...] | list[str],
     task_id: int,
     user_id: int | None,
+    work_date: str,
     token: str | None,
     api_request_fn,
 ) -> dict[str, Any] | None:
-    """Return the existing estimate row for this task (optionally scoped to user)."""
+    """Return estimate for this task+date (optionally scoped to user). Cross-day rows are ignored."""
     import api_client
+
+    target_date = _normalize_estimate_date(work_date)
+    if not target_date:
+        return None
 
     last_error: Exception | None = None
     for path in list_paths:
         try:
+            params: dict[str, Any] = {"task_id": task_id, "page": 1, "limit": 100}
+            # Prefer server-side date filter when supported
+            params["date"] = target_date
+            params["start_date"] = target_date
+            params["end_date"] = target_date
             payload = api_request_fn(
                 "GET",
                 path,
-                {"task_id": task_id, "page": 1, "limit": 100},
+                params,
                 token=token,
             )
         except (api_client.ClientError, OSError) as exc:
@@ -118,6 +459,14 @@ def find_existing_task_estimate(
         for item in items:
             item_task = _parse_estimate_int(item.get("task_id"))
             if item_task is not None and item_task != task_id:
+                continue
+            item_date = _normalize_estimate_date(
+                item.get("date") or item.get("work_date") or item.get("estimate_date")
+            )
+            if item_date and item_date != target_date:
+                continue
+            # If list API ignored date filter and row has no date, skip (avoid false duplicate)
+            if not item_date:
                 continue
             item_user = _parse_estimate_int(
                 item.get("user_id") or item.get("uid") or item.get("create_user_id")
@@ -145,6 +494,7 @@ def duplicate_estimate_payload(
     *,
     operation: str,
     task_id: int,
+    work_date: str,
     existing: dict[str, Any],
     update_operation: str,
     kind: str,
@@ -152,30 +502,34 @@ def duplicate_estimate_payload(
     existing_id = _parse_estimate_int(
         existing.get("id") or existing.get("estimate_id") or existing.get("work_hour_id")
     )
+    day = _normalize_estimate_date(work_date) or _normalize_estimate_date(existing.get("date"))
     return {
         "error": "duplicate_estimate",
         "detail": (
-            f"该{kind}任务（task_id={task_id}）已有工时记录，同一任务只能有一条。"
-            f"请改用 {update_operation} 更新已有记录，不要再次 add。"
+            f"该{kind}任务（task_id={task_id}）在 {day} 已有工时记录，"
+            f"同一任务同一天只能有一条。请改用 {update_operation} 更新当日记录，不要再次 add。"
+            f"若要填其他日期，请带对应 date 再 add（跨天允许各一条）。"
         ),
         "operation": operation,
         "task_id": task_id,
+        "date": day,
         "existing_estimate_id": existing_id,
         "existing": {
             "id": existing_id,
             "task_id": _parse_estimate_int(existing.get("task_id")) or task_id,
-            "date": existing.get("date"),
+            "date": existing.get("date") or day,
             "consumed": existing.get("consumed"),
             "remark": existing.get("remark"),
             "user_id": existing.get("user_id") or existing.get("uid"),
         },
         "next_operation": update_operation,
-        "message": "同一任务已有工时，请改为更新而不是新增。",
+        "message": f"同一任务在 {day} 已有工时，请改为更新当日记录而不是新增。",
         "agent_instruction": (
-            f"禁止再次调用 {operation}。"
-            f"向用户说明该任务已有工时记录（id={existing_id}），"
-            f"确认要改工时后调用 {update_operation}，"
-            f"--param id {existing_id} 并带上新的 consumed/remark/date。"
+            f"禁止再次对同一天调用 {operation}。"
+            f"向用户说明：任务可跨天填报，但同一天只能有一条；"
+            f"{day} 已有记录（id={existing_id}）。"
+            f"若要改当天工时：调用 {update_operation} --param id {existing_id}；"
+            f"若要填其他日期：用 {operation} 并带上新的 --param date YYYY-MM-DD（不要误报会覆盖其他天）。"
         ),
         "example_command": (
             f"python3 scripts/api_client.py {update_operation} "
@@ -198,11 +552,15 @@ def enforce_unique_task_estimate(
     task_id = _parse_estimate_int(body.get("task_id"))
     if task_id is None:
         return
+    work_date = _normalize_estimate_date(body.get("date") or body.get("work_date"))
+    if not work_date:
+        work_date = date.today().isoformat()
     user_id = _parse_estimate_int(body.get("user_id")) or actor_user_id
     existing = find_existing_task_estimate(
         list_paths=spec["list_paths"],
         task_id=task_id,
         user_id=user_id,
+        work_date=work_date,
         token=token,
         api_request_fn=api_request_fn,
     )
@@ -210,15 +568,32 @@ def enforce_unique_task_estimate(
         return
     import api_client
 
+    existing_id = _estimate_record_id(existing)
+    confirm_status = existing.get("confirm_status")
+    if existing_id is not None and _is_estimate_confirmed(confirm_status):
+        _raise_estimate_immutable(
+            error="estimate_confirmed_immutable",
+            operation=operation,
+            estimate_id=existing_id,
+            kind=str(spec["kind"]),
+            work_date=work_date,
+            confirm_status=confirm_status,
+            detail=(
+                f"该{spec['kind']}任务（task_id={task_id}）在 {work_date} 已有工时且已确认"
+                f"（id={existing_id}），不可再新增或修改。"
+            ),
+            message=f"{work_date} 的工时已确认，不可修改",
+        )
+
     payload = duplicate_estimate_payload(
         operation=operation,
         task_id=task_id,
+        work_date=work_date,
         existing=existing,
         update_operation=str(spec["update_operation"]),
         kind=str(spec["kind"]),
     )
     raise api_client.ClientError("duplicate_estimate", json.dumps(payload, ensure_ascii=False))
-
 
 def resolve_write(mode: str, params: dict[str, Any]) -> dict[str, Any]:
     import api_client

@@ -1061,7 +1061,13 @@ from operations_read_enhanced import (
     READ_ENHANCED_RESOLVE_MODES,
     resolve_read_enhanced,
 )
-from operations_write import WRITE_OPERATIONS, resolve_write, enforce_unique_task_estimate
+from operations_write import (
+    WRITE_OPERATIONS,
+    resolve_write,
+    enforce_unique_task_estimate,
+    enforce_estimate_date_in_task_range,
+    enforce_estimate_modifiable,
+)
 from operations_export import EXPORT_OPERATIONS, EXPORT_RESOLVE_MODES, resolve_export
 from skill_enhancements import (
     apply_period_natural_language,
@@ -1352,6 +1358,18 @@ def run_operation(name: str, params: dict[str, Any]) -> Any:
             if ctx is not None:
                 enforce_write_project_scope(body, ctx)
             if ctx is not None:
+                enforce_estimate_date_in_task_range(
+                    name,
+                    body,
+                    token=token,
+                    api_request_fn=api_request,
+                )
+                enforce_estimate_modifiable(
+                    name,
+                    body,
+                    token=token,
+                    api_request_fn=api_request,
+                )
                 enforce_unique_task_estimate(
                     name,
                     body,
@@ -1360,6 +1378,18 @@ def run_operation(name: str, params: dict[str, Any]) -> Any:
                     actor_user_id=ctx.user_id,
                 )
             else:
+                enforce_estimate_date_in_task_range(
+                    name,
+                    body,
+                    token=token,
+                    api_request_fn=api_request,
+                )
+                enforce_estimate_modifiable(
+                    name,
+                    body,
+                    token=token,
+                    api_request_fn=api_request,
+                )
                 enforce_unique_task_estimate(
                     name,
                     body,
@@ -1588,6 +1618,9 @@ def main(argv: list[str] | None = None) -> int:
             "identity_required",
             "permission_denied",
             "duplicate_estimate",
+            "estimate_date_out_of_range",
+            "estimate_confirmed_immutable",
+            "estimate_historical_immutable",
         ):
             try:
                 payload = json.loads(e.detail)

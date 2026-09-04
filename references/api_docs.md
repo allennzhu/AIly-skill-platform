@@ -622,7 +622,7 @@ python3 scripts/api_client.py add_project_moment \
 |----|-----|
 | CLI | `add_project_task_estimate` |
 | HTTP | `POST /manage_api/project_task_estimate/add` |
-| 说明 | **仅项目任务**。非项目任务请用 `add_not_project_estimate`。**同一任务只能有一条工时**，已存在则返回 `duplicate_estimate`，应改用 `update_project_task_estimate` |
+| 说明 | **仅项目任务**。非项目任务请用 `add_not_project_estimate`。填报 `date` 须在任务 `start_date`～`end_date` 内，否则返回 `estimate_date_out_of_range`。**同一任务同一天只能有一条工时**，当天已存在则返回 `duplicate_estimate`，应改用 `update_project_task_estimate`（若当日记录已确认则返回 `estimate_confirmed_immutable`，不可改）；跨天可分别 add |
 | Body | `task_id`、`date`（默认当天）、`consumed`、`remark`；可选 `user_id` |
 
 别名：`hours`/`work_hours`→`consumed`；`work_date`→`date`；`user_name`→`user_id`。
@@ -690,8 +690,8 @@ python3 scripts/api_client.py add_project_task_estimate \
 |------|------|------|
 | `confirm_user_work_hours` | `POST data_export/estimate_hour_confirm_by_others` | 代确认用户某日工时 |
 | `approve_work_hour_batch` | `POST data_export/process_check_by_ids` | 批量审核工时 |
-| `add_not_project_estimate` | `POST project_not_task_estimate/add` | **仅非项目**任务工时；同一任务仅一条，重复 add 返回 `duplicate_estimate` |
-| `update_project_task_estimate` | `PUT project_task_estimate/update` | 更新**项目**任务工时 |
+| `add_not_project_estimate` | `POST project_not_task_estimate/add` | **仅非项目**任务工时；`date` 须在任务起止范围内（否则 `estimate_date_out_of_range`）；同一任务同一天仅一条，当日重复 add 返回 `duplicate_estimate`（已确认则 `estimate_confirmed_immutable`） |
+| `update_project_task_estimate` | `PUT project_task_estimate/update` | 更新**项目**任务工时；已确认/`estimate_confirmed_immutable`、非当日历史/`estimate_historical_immutable` 不可改 |
 | `update_project_moment` | `PUT project_moment/update` | 更新项目动态 |
 | `add_bug` | `POST bug/add` | 登记 BUG |
 | `apply_publish` | `POST produce_demand/apply_publish` | 申请递交 |
@@ -702,7 +702,7 @@ python3 scripts/api_client.py add_project_task_estimate \
 | `add_not_project_demand` | `POST project_not_task/add` | 新增非项目需求 |
 | `add_not_project_task` | `POST project_not_task/add_task` | 新增非项目任务 |
 | `finish_not_project_task` | `POST project_not_task/finish_task` | 完成非项目任务 |
-| `update_not_project_estimate` | `PUT project_not_task_estimate/update` | 更新非项目任务工时 |
+| `update_not_project_estimate` | `PUT project_not_task_estimate/update` | 更新非项目任务工时；已确认或历史不可改 |
 | `add_apply_demand` | `POST produce_demand/add_apply_demand` | 新增申请制作需求 |
 | `add_demand_pool` | `POST produce_demand/add_demand_pool` | 拆解新增制作需求池 |
 | `add_feedback_demand_pool` | `POST produce_demand/add_demand_pool` | 新增反馈类需求池（`demand_type=反馈`） |

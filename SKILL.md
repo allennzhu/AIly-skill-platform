@@ -82,7 +82,10 @@ CLI 返回 `"error": "permission_denied"` 且 `"terminal": true` 时：
 | `identity_required` | 未 save-identity | 智能体先 save-identity，再重试业务 |
 | `auth_required` | 未登录 51PM / Token 缓存未写入 | 引导打开 51PM（已登录打开首页即可同步；未登录用 `login_url`）。同会话其它业务已通时禁止说「某某接口单独要登录」 |
 | `resolve_failed` | 昵称未找到 | 先 `search_user` 确认昵称 |
-| `duplicate_estimate` | 该任务已有工时 | **改走 update**（`existing_estimate_id`），禁止再 add |
+| `duplicate_estimate` | 该任务**当天**已有工时（且仍待确认） | **改走 update**（`existing_estimate_id`）；跨天应带新 `date` 再 add，禁止说「整任务只能一条会覆盖其他天」 |
+| `estimate_date_out_of_range` | 填写日期不在任务起止范围内 | **禁止强行 add**；把 `task_start_date`～`task_end_date` 告知用户，请改 `date` 或换任务 |
+| `estimate_confirmed_immutable` | 该工时**已确认** | **禁止 update/再 add**；告知用户已确认不可改 |
+| `estimate_historical_immutable` | 非当天的历史工时 | **禁止 update**；仅允许改当天且仍待确认的记录 |
 
 ### 端口说明
 
@@ -378,10 +381,13 @@ python3 scripts/api_client.py get_task_list --param start_date 2026-09-01
 3. 用户明确「项目」或给出商机号/项目名 → 才用 `add_project_task_estimate`。
 4. `dry_run` 预览里看 `summary.work_hour_kind`：若是「项目」但用户要的是非项目，**立即改接口重预览**，不要让用户确认错接口。
 5. 非项目任务的 `task_id` 与项目任务的 `task_id` **不是同一套表**，不能混用。
-6. **同一任务只能有一条工时记录**（同一填写人）。`add_*_estimate` 若返回 `duplicate_estimate`：
-   - **禁止**再 add
-   - 使用返回的 `existing_estimate_id` 调用对应 `update_*_estimate`
-   - 向用户说明「该任务已有工时，将改为更新」
+6. **填报日期必须在任务时间范围内**（任务 `start_date`～`end_date`）。`add_*_estimate` 若返回 `estimate_date_out_of_range`：把范围告知用户，改 `date` 或换任务，禁止强行 add。
+7. **同一任务同一天只能有一条工时**（同一填写人）；任务可跨天，每天各一条。`add_*_estimate` 若返回 `duplicate_estimate`：
+   - **禁止**对同一天再 add
+   - 使用返回的 `existing_estimate_id` 调用对应 `update_*_estimate`（更新**当日**记录）
+   - 若用户要填**另一天**：带 `--param date YYYY-MM-DD` 再 add；**禁止**说「整任务只能一条、会覆盖其他天」
+   - 向用户说明「该任务在当天已有工时，将改为更新当日记录」
+8. **已确认或历史工时不可修改**。`update_*_estimate` / 重复 add 若返回 `estimate_confirmed_immutable` 或 `estimate_historical_immutable`：禁止再试 update，直接告知用户；仅当天且待确认的记录可改。
 
 ```bash
 # ✅ 非项目任务工时
