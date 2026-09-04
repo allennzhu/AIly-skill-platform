@@ -37,6 +37,188 @@ _CONFIRM_LABEL = {
     "ConfirmNotTaskEstimate": "非项目工时",
 }
 
+# 同一任务（同一填写人）只能有一条工时记录；已存在则必须改走 update
+UNIQUE_TASK_ESTIMATE_OPS: dict[str, dict[str, Any]] = {
+    "add_project_task_estimate": {
+        "kind": "项目",
+        "update_operation": "update_project_task_estimate",
+        "list_paths": (
+            "/manage_api/project_task_estimate/get_task_estimate_list",
+            "/manage_api/project_task_estimate/get_estimate_list",
+        ),
+    },
+    "add_not_project_estimate": {
+        "kind": "非项目",
+        "update_operation": "update_not_project_estimate",
+        "list_paths": (
+            "/manage_api/project_not_task_estimate/get_task_estimate_list",
+        ),
+    },
+}
+
+
+def _parse_estimate_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _estimate_items_from_payload(payload: Any) -> list[dict[str, Any]]:
+    from skill_enhancements import extract_page_items
+
+    items, _ = extract_page_items(payload)
+    out = [item for item in items if isinstance(item, dict)]
+    if out:
+        return out
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get("data", payload)
+    if isinstance(data, dict):
+        for key in ("estimate_list", "estimates", "list", "rows"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+        nested = data.get("data")
+        if isinstance(nested, dict):
+            for key in ("estimate_list", "estimates", "list"):
+                value = nested.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def find_existing_task_estimate(
+    *,
+    list_paths: tuple[str, ...] | list[str],
+    task_id: int,
+    user_id: int | None,
+    token: str | None,
+    api_request_fn,
+) -> dict[str, Any] | None:
+    """Return the existing estimate row for this task (optionally scoped to user)."""
+    import api_client
+
+    last_error: Exception | None = None
+    for path in list_paths:
+        try:
+            payload = api_request_fn(
+                "GET",
+                path,
+                {"task_id": task_id, "page": 1, "limit": 100},
+                token=token,
+            )
+        except (api_client.ClientError, OSError) as exc:
+            last_error = exc
+            continue
+        items = _estimate_items_from_payload(payload)
+        matches: list[dict[str, Any]] = []
+        for item in items:
+            item_task = _parse_estimate_int(item.get("task_id"))
+            if item_task is not None and item_task != task_id:
+                continue
+            item_user = _parse_estimate_int(
+                item.get("user_id") or item.get("uid") or item.get("create_user_id")
+            )
+            if user_id is not None and item_user is not None and item_user != user_id:
+                continue
+            matches.append(item)
+        if user_id is not None:
+            same_user = [
+                item
+                for item in matches
+                if _parse_estimate_int(
+                    item.get("user_id") or item.get("uid") or item.get("create_user_id")
+                )
+                == user_id
+            ]
+            if same_user:
+                matches = same_user
+        return matches[0] if matches else None
+    _ = last_error
+    return None
+
+
+def duplicate_estimate_payload(
+    *,
+    operation: str,
+    task_id: int,
+    existing: dict[str, Any],
+    update_operation: str,
+    kind: str,
+) -> dict[str, Any]:
+    existing_id = _parse_estimate_int(
+        existing.get("id") or existing.get("estimate_id") or existing.get("work_hour_id")
+    )
+    return {
+        "error": "duplicate_estimate",
+        "detail": (
+            f"该{kind}任务（task_id={task_id}）已有工时记录，同一任务只能有一条。"
+            f"请改用 {update_operation} 更新已有记录，不要再次 add。"
+        ),
+        "operation": operation,
+        "task_id": task_id,
+        "existing_estimate_id": existing_id,
+        "existing": {
+            "id": existing_id,
+            "task_id": _parse_estimate_int(existing.get("task_id")) or task_id,
+            "date": existing.get("date"),
+            "consumed": existing.get("consumed"),
+            "remark": existing.get("remark"),
+            "user_id": existing.get("user_id") or existing.get("uid"),
+        },
+        "next_operation": update_operation,
+        "message": "同一任务已有工时，请改为更新而不是新增。",
+        "agent_instruction": (
+            f"禁止再次调用 {operation}。"
+            f"向用户说明该任务已有工时记录（id={existing_id}），"
+            f"确认要改工时后调用 {update_operation}，"
+            f"--param id {existing_id} 并带上新的 consumed/remark/date。"
+        ),
+        "example_command": (
+            f"python3 scripts/api_client.py {update_operation} "
+            f"--param id {existing_id} --param consumed <工时> --param remark <备注>"
+        ),
+    }
+
+
+def enforce_unique_task_estimate(
+    operation: str,
+    body: dict[str, Any],
+    *,
+    token: str | None,
+    api_request_fn,
+    actor_user_id: int | None = None,
+) -> None:
+    spec = UNIQUE_TASK_ESTIMATE_OPS.get(operation)
+    if not spec:
+        return
+    task_id = _parse_estimate_int(body.get("task_id"))
+    if task_id is None:
+        return
+    user_id = _parse_estimate_int(body.get("user_id")) or actor_user_id
+    existing = find_existing_task_estimate(
+        list_paths=spec["list_paths"],
+        task_id=task_id,
+        user_id=user_id,
+        token=token,
+        api_request_fn=api_request_fn,
+    )
+    if not existing:
+        return
+    import api_client
+
+    payload = duplicate_estimate_payload(
+        operation=operation,
+        task_id=task_id,
+        existing=existing,
+        update_operation=str(spec["update_operation"]),
+        kind=str(spec["kind"]),
+    )
+    raise api_client.ClientError("duplicate_estimate", json.dumps(payload, ensure_ascii=False))
+
 
 def resolve_write(mode: str, params: dict[str, Any]) -> dict[str, Any]:
     import api_client
@@ -608,6 +790,36 @@ def _preview_add_moment(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _preview_add_project_estimate(body: dict[str, Any]) -> dict[str, Any]:
+    preview = _preview_add_estimate(body)
+    preview["work_hour_kind"] = "项目"
+    preview["work_hour_kind_note"] = (
+        "本操作为项目任务工时。若用户说的是非项目任务，请改用 add_not_project_estimate"
+    )
+    return preview
+
+
+def _preview_add_not_project_estimate(body: dict[str, Any]) -> dict[str, Any]:
+    preview = _preview_add_estimate(body)
+    preview["work_hour_kind"] = "非项目"
+    preview["work_hour_kind_note"] = (
+        "本操作为非项目任务工时。若用户说的是项目任务，请改用 add_project_task_estimate"
+    )
+    return preview
+
+
+def _warnings_add_project_estimate(body: dict[str, Any]) -> list[str]:
+    return [
+        "请确认是【项目任务】工时；非项目任务必须改用 add_not_project_estimate，禁止写入本接口"
+    ]
+
+
+def _warnings_add_not_project_estimate(body: dict[str, Any]) -> list[str]:
+    return [
+        "请确认是【非项目任务】工时；项目任务必须改用 add_project_task_estimate，禁止写入本接口"
+    ]
+
+
 def _preview_add_estimate(body: dict[str, Any]) -> dict[str, Any]:
     return {
         "task_id": body.get("task_id"),
@@ -738,7 +950,8 @@ WRITE_OPERATIONS: dict[str, dict[str, Any]] = {
             "risk_desc",
         ],
         "body_required": ["task_id", "date", "consumed", "remark"],
-        "preview_summary": _preview_add_estimate,
+        "preview_summary": _preview_add_project_estimate,
+        "preview_warnings": _warnings_add_project_estimate,
     },
     "confirm_user_work_hours": {
         "description": "【写】代确认用户某日工时",
@@ -818,7 +1031,8 @@ WRITE_OPERATIONS: dict[str, dict[str, Any]] = {
         "write_resolve_mode": "add_not_project_estimate",
         "body_params": ["task_id", "date", "consumed", "remark", "user_id"],
         "body_required": ["task_id", "date", "consumed", "remark"],
-        "preview_summary": _preview_add_estimate,
+        "preview_summary": _preview_add_not_project_estimate,
+        "preview_warnings": _warnings_add_not_project_estimate,
     },
     "update_project_task_estimate": {
         "description": "【写】更新项目任务工时",

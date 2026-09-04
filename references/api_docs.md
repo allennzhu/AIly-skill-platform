@@ -13,6 +13,8 @@
 
 请求头：`Authorization: Bearer {access_token}`。
 
+本地 IDE 请使用 **51PM_CLI**，见 `references/auth_flow_design.md`。
+
 ## 操作：export_estimate_hour_by_project
 
 按项目/部门/日期导出全量工时明细 Excel（项目任务 + 非项目任务）。
@@ -620,6 +622,7 @@ python3 scripts/api_client.py add_project_moment \
 |----|-----|
 | CLI | `add_project_task_estimate` |
 | HTTP | `POST /manage_api/project_task_estimate/add` |
+| 说明 | **仅项目任务**。非项目任务请用 `add_not_project_estimate`。**同一任务只能有一条工时**，已存在则返回 `duplicate_estimate`，应改用 `update_project_task_estimate` |
 | Body | `task_id`、`date`（默认当天）、`consumed`、`remark`；可选 `user_id` |
 
 别名：`hours`/`work_hours`→`consumed`；`work_date`→`date`；`user_name`→`user_id`。
@@ -687,8 +690,8 @@ python3 scripts/api_client.py add_project_task_estimate \
 |------|------|------|
 | `confirm_user_work_hours` | `POST data_export/estimate_hour_confirm_by_others` | 代确认用户某日工时 |
 | `approve_work_hour_batch` | `POST data_export/process_check_by_ids` | 批量审核工时 |
-| `add_not_project_estimate` | `POST project_not_task_estimate/add` | 非项目任务工时 |
-| `update_project_task_estimate` | `PUT project_task_estimate/update` | 更新项目任务工时 |
+| `add_not_project_estimate` | `POST project_not_task_estimate/add` | **仅非项目**任务工时；同一任务仅一条，重复 add 返回 `duplicate_estimate` |
+| `update_project_task_estimate` | `PUT project_task_estimate/update` | 更新**项目**任务工时 |
 | `update_project_moment` | `PUT project_moment/update` | 更新项目动态 |
 | `add_bug` | `POST bug/add` | 登记 BUG |
 | `apply_publish` | `POST produce_demand/apply_publish` | 申请递交 |

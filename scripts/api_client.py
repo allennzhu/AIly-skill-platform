@@ -139,16 +139,14 @@ def _request_with_session(
     json_body: dict[str, Any] | None = None,
 ) -> Any:
     token = _runtime_access_token()
-    if token:
-        return api_request(
-            method,
-            path,
-            params,
-            token=token,
-            json_body=json_body,
-            auth_sensitive=True,
-        )
-    return api_request(method, path, params, json_body=json_body)
+    return api_request(
+        method,
+        path,
+        params,
+        token=token,
+        json_body=json_body,
+        auth_sensitive=bool(token),
+    )
 
 
 def _clear_auth_runtime() -> None:
@@ -194,7 +192,8 @@ def api_request(
         "Accept": "application/json",
     }
     if not anonymous:
-        if not token:
+        bearer = token if token not in (None, "") else _runtime_access_token()
+        if not bearer:
             raise ClientError(
                 "auth_required",
                 json.dumps(
@@ -202,7 +201,10 @@ def api_request(
                     ensure_ascii=False,
                 ),
             )
-        headers["Authorization"] = f"Bearer {token}"
+        headers["Authorization"] = f"Bearer {bearer}"
+        # 使用会话 Token 时，业务码 444 / HTTP 401 应按登录失效处理
+        if token in (None, ""):
+            auth_sensitive = True
     data: bytes | None = None
     if json_body is not None:
         data = json.dumps(json_body, ensure_ascii=False).encode("utf-8")
@@ -279,8 +281,19 @@ def download_binary(
     if clean_params and method.upper() == "GET":
         url = url + "?" + urlencode(clean_params, doseq=True)
     headers = {"Accept": "*/*"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    bearer = token if token not in (None, "") else _runtime_access_token()
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
+    elif token is None:
+        raise ClientError(
+            "auth_required",
+            json.dumps(
+                _auth_required_payload(
+                    "缺少登录 Token，请先完成 save-identity 与 51PM 登录"
+                ),
+                ensure_ascii=False,
+            ),
+        )
     req = Request(url, headers=headers, method=method.upper())
     try:
         with urlopen(req, timeout=timeout) as resp:
@@ -1048,7 +1061,7 @@ from operations_read_enhanced import (
     READ_ENHANCED_RESOLVE_MODES,
     resolve_read_enhanced,
 )
-from operations_write import WRITE_OPERATIONS, resolve_write
+from operations_write import WRITE_OPERATIONS, resolve_write, enforce_unique_task_estimate
 from operations_export import EXPORT_OPERATIONS, EXPORT_RESOLVE_MODES, resolve_export
 from skill_enhancements import (
     apply_period_natural_language,
@@ -1338,6 +1351,21 @@ def run_operation(name: str, params: dict[str, Any]) -> Any:
             body = pick_body(resolved, body_keys)
             if ctx is not None:
                 enforce_write_project_scope(body, ctx)
+            if ctx is not None:
+                enforce_unique_task_estimate(
+                    name,
+                    body,
+                    token=token,
+                    api_request_fn=api_request,
+                    actor_user_id=ctx.user_id,
+                )
+            else:
+                enforce_unique_task_estimate(
+                    name,
+                    body,
+                    token=token,
+                    api_request_fn=api_request,
+                )
             return execute_write(name, meta, body, control, token, api_request)
         resolved = dict(work_params)
         summarize = _should_summarize(resolved, meta)
@@ -1554,7 +1582,13 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(error_payload("config_error", str(e)), ensure_ascii=False))
         return 1
     except ClientError as e:
-        if e.error in ("auth_required", "need_input", "identity_required", "permission_denied"):
+        if e.error in (
+            "auth_required",
+            "need_input",
+            "identity_required",
+            "permission_denied",
+            "duplicate_estimate",
+        ):
             try:
                 payload = json.loads(e.detail)
                 print(json.dumps(payload, ensure_ascii=False))

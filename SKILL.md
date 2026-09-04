@@ -54,13 +54,23 @@ CLI 返回 `"error": "permission_denied"` 且 `"terminal": true` 时：
 | 业务命令传 `--param union_id` / `email` |
 | 读 `auth_session.py` 探索实现 |
 
+### 填工时：项目 ≠ 非项目（禁止混写）
+
+| 用户明确/任务来源 | 正确写接口 |
+|------------------|------------|
+| 非项目 / 内部运营等 | `add_not_project_estimate` |
+| 项目 / 商机号 | `add_project_task_estimate` |
+
+**禁止**把非项目任务写到 `add_project_task_estimate`。说不清类型时先问用户，不要默认当项目。详见下文「填工时路由」。
+
 ### 常见报错
 
 | 报错 | 含义 | 动作 |
 |------|------|------|
 | `identity_required` | 未 save-identity | 智能体先 save-identity，再重试业务 |
-| `auth_required` | 未登录 51PM | 发 login_url，登录后重试 |
+| `auth_required` | 未登录 51PM / Token 失效 | 发 login_url，登录后重试。**若同一会话里工时/项目/递交已能查通，禁止再说「某某接口单独要登录」**——多为解析子请求未带 Token（已修）或该接口业务错误被误读 |
 | `resolve_failed` | 昵称未找到 | 先 `search_user` 确认昵称 |
+| `duplicate_estimate` | 该任务已有工时 | **改走 update**（`existing_estimate_id`），禁止再 add |
 
 ### 端口说明
 
@@ -192,7 +202,7 @@ python3 scripts/api_client.py get_dept_members --param dept_name 项目场景B
 python3 scripts/api_client.py get_dept_members --param my_team_scope 1
 ```
 
-**鉴权说明**：`get_dept_members` 与 `get_work_hours` 等**共用同一登录 Token**（`save-identity` + `/skill_auth/token`）。若工时等业务接口已成功，**禁止**向用户说「部门成员要另开浏览器登录」——除非 CLI 明确返回 `auth_required`。
+**鉴权说明**：`get_dept_members`、报价单、递交等业务接口与 `get_work_hours` **共用同一登录 Token**（`save-identity` + `/skill_auth/token`）。若工时/项目/递交已成功，**禁止**向用户说「报价单/部门成员要另开浏览器登录」——除非 CLI 明确返回 `auth_required` 且同会话其他业务也失败。
 
 | CLI 返回 | 含义 | Agent 动作 |
 |----------|------|------------|
@@ -282,7 +292,9 @@ python3 scripts/api_client.py get_task_list --param start_date 2026-09-01
 | 供应商档案 | `get_supplier_list` / `get_supplier_detail` | 公司名称关键字 | 供应商基础信息 |
 | 确认工时花费 | `confirm_my_work_hours` | **写** 两阶段：先 `dry_run` 预览，用户确认后再 `confirm=1` | 确认项目/非项目工时 |
 | 新增项目动态 | `add_project_moment` | **写** 两阶段；`module` 可用 会议/风险/问题 | 登记会议、风险、问题 |
-| 登记任务工时 | `add_project_task_estimate` | **写** 两阶段；必填 `task_id`+`consumed`+`remark` | 填报项目任务花费 |
+| **填报工时（必先分项目/非项目）** | 见下节「填工时路由」 | **禁止**默认用项目接口 | 按任务类型二选一 |
+| 登记**项目**任务工时 | `add_project_task_estimate` | **写**；仅项目任务；`task_id`+`consumed`+`remark` | 项目任务花费 |
+| 登记**非项目**任务工时 | `add_not_project_estimate` | **写**；仅非项目任务；`task_id`+`consumed`+`remark` | 非项目任务花费 |
 | 未确认工时 | `get_unconfirmed_work_hours` | 本月默认；可 `--summarize` | 待确认工时清单 |
 | 月度绩效 | `get_performance_list` / `get_performance_user` | 必填日期范围 | 绩效审核进度/详情 |
 | 人员/部门 | `search_user` / `get_department_list` / `get_dept_members` | 昵称搜索；按部门列成员（`get_dept_members` 无本地范围限制） | 解析 user_id/dept_id、组员名单 |
@@ -290,8 +302,8 @@ python3 scripts/api_client.py get_task_list --param start_date 2026-09-01
 | 递交扩展 | `get_qa_reject_publish_list` / `get_bd_publish_list` / `get_publish_demand_pool` | 审批/BD/需求池 | 递交闭环 |
 | 字典常量 | `get_bug_const` / `get_publish_normal_const` / `get_project_moment_config_list` / `get_apply_demand_consts` | 写操作前预取 | 减少 type/status 猜测 |
 | 代确认/批量审核工时 | `confirm_user_work_hours` / `approve_work_hour_batch` | **写** 两阶段 | PM 确认下属工时 |
-| 非项目/更新工时 | `add_not_project_estimate` / `update_project_task_estimate` | **写** | 与非项目/项目读接口闭环 |
-| 非项目需求/任务 | `add_not_project_demand` / `add_not_project_task` / `finish_not_project_task` / `update_not_project_estimate` | **写** 两阶段 | 非项目闭环 |
+| 非项目/更新工时 | `add_not_project_estimate` / `update_not_project_estimate` / `update_project_task_estimate` | **写** | 更新时同样按项目/非项目选接口 |
+| 非项目需求/任务 | `add_not_project_demand` / `add_not_project_task` / `finish_not_project_task` | **写** 两阶段 | 非项目闭环 |
 | 制作需求/反馈 | `add_apply_demand` / `add_demand_pool` / `add_feedback_demand_pool` | **写** 两阶段；可先 `get_apply_demand_consts` | 申请制作需求、拆解需求池、新增反馈 |
 | 递交通过 | `approve_publish_apply` | **写** 两阶段 | 通过递交申请并排期 |
 | 登记 BUG / 申请递交 | `add_bug` / `apply_publish` / `reject_publish_apply` | **写**；BUG 可先 `get_bug_const` | QA/PM 日常操作 |
@@ -324,11 +336,47 @@ python3 scripts/api_client.py get_task_list --param start_date 2026-09-01
 | 场景 | 步骤 |
 |------|------|
 | **工时确认闭环** | `get_unconfirmed_work_hours --summarize` → 用户确认 → `confirm_my_work_hours`（或主管 `confirm_user_work_hours`） |
+| **填报项目工时** | 确认是项目任务 → `get_task_list` → `add_project_task_estimate`（dry_run→confirm） |
+| **填报非项目工时** | 确认是非项目 → `get_not_project_list` / 需求任务列表 → `add_not_project_estimate`（dry_run→confirm） |
 | **递交审批闭环** | `get_apply_publish_list` → `get_qa_reject_publish_list` → `approve_publish_apply` / `reject_publish_apply` |
 | **制作需求闭环** | `get_apply_demand_consts` → `add_apply_demand` → `add_demand_pool` / `add_feedback_demand_pool` |
 | **非项目闭环** | `get_not_project_list` → `add_not_project_demand` → `add_not_project_task` → `add_not_project_estimate` |
 | **登记 BUG** | `get_bug_const` → `add_bug`（dry_run）→ confirm |
 | **项目价值维护** | `get_project_overview_value` → 编辑 rows → `save_project_overview_value` |
+
+## 填工时路由（项目 vs 非项目，最高优先级）
+
+51PM 工时**分两套接口**，写错会把非项目工时记到项目上（或反过来）。**禁止默认使用 `add_project_task_estimate`。**
+
+| 用户说法 / 任务来源 | 查任务 | 写工时 | 更新工时 |
+|--------------------|--------|--------|----------|
+| 项目 / 商机号 SJ… / 展厅项目任务 | `get_task_list`（带 `project_name`/`sj_num`） | **`add_project_task_estimate`** | `update_project_task_estimate` |
+| **非项目** / 内部运营 / 休假类非项目任务 / `not_project` | `get_not_project_list` → `get_not_project_demand_list` / 任务列表 | **`add_not_project_estimate`** | `update_not_project_estimate` |
+| 确认已有花费 | — | `confirm_my_work_hours` + `confirm_type`=`项目` 或 `非项目` | — |
+
+### Agent 纪律
+
+1. 用户说「填工时 / 记工时」时：**先判断是项目还是非项目**；说不清就问一句，**不要猜成项目**。
+2. 用户明确「非项目」或任务来自非项目列表 → **只能** `add_not_project_estimate`，**禁止** `add_project_task_estimate` / `get_task_list`（项目任务）。
+3. 用户明确「项目」或给出商机号/项目名 → 才用 `add_project_task_estimate`。
+4. `dry_run` 预览里看 `summary.work_hour_kind`：若是「项目」但用户要的是非项目，**立即改接口重预览**，不要让用户确认错接口。
+5. 非项目任务的 `task_id` 与项目任务的 `task_id` **不是同一套表**，不能混用。
+6. **同一任务只能有一条工时记录**（同一填写人）。`add_*_estimate` 若返回 `duplicate_estimate`：
+   - **禁止**再 add
+   - 使用返回的 `existing_estimate_id` 调用对应 `update_*_estimate`
+   - 向用户说明「该任务已有工时，将改为更新」
+
+```bash
+# ✅ 非项目任务工时
+python3 scripts/api_client.py add_not_project_estimate \
+  --param task_id 1001 --param consumed 2 --param remark 内部培训
+
+# ✅ 项目任务工时
+python3 scripts/api_client.py add_project_task_estimate \
+  --param task_id 2002 --param consumed 3 --param remark 联调接口
+
+# ❌ 禁止：用户说非项目，却调 add_project_task_estimate
+```
 
 ## 写操作交互协议
 
@@ -337,7 +385,7 @@ python3 scripts/api_client.py get_task_list --param start_date 2026-09-01
 ### 流程
 
 1. **预览**：`dry_run=1`（默认，或 CLI `--dry-run`）→ 返回 `dry_run: true`、`summary`、`resolved_body`、`confirm_token`、`warnings`
-2. **向用户说明**：用自然语言复述 `summary`；若有 `warnings` 一并提示（如缺 `user_id`、`risk_level`）
+2. **向用户说明**：用自然语言复述 `summary`（含 `work_hour_kind`）；若有 `warnings` 一并提示
 3. **用户确认后执行**：相同业务参数 + `confirm=1` + `confirm_token`（CLI `--confirm --param confirm_token ...`）
 4. **跳过确认**（仅用户明确要求直接提交时）：`force=1`
 
@@ -345,9 +393,10 @@ python3 scripts/api_client.py get_task_list --param start_date 2026-09-01
 
 | 操作 | 场景 | 关键参数 |
 |------|------|---------|
-| `confirm_my_work_hours` | 确认待确认工时 | `id`（或 `estimate_id`）+ `confirm_type`（`项目`/`非项目` 或 `ConfirmTaskEstimate`/`ConfirmNotTaskEstimate`） |
-| `add_project_moment` | 新增会议/风险/问题动态 | `project_name`/`sj_num` + `module` + `content` + `type` + `user_name`（多人逗号分隔）；风险/问题建议带 `risk_level` |
-| `add_project_task_estimate` | 登记任务工时 | `task_id` + `consumed` + `remark`；可选 `date`（默认今天）、`user_name` |
+| `confirm_my_work_hours` | 确认待确认工时 | `id`（或 `estimate_id`）+ `confirm_type`（`项目`/`非项目`） |
+| `add_project_moment` | 新增会议/风险/问题动态 | `project_name`/`sj_num` + `module` + `content` + `type` + `user_name` |
+| `add_project_task_estimate` | **仅**登记项目任务工时 | `task_id` + `consumed` + `remark`；可选 `date`、`user_name` |
+| `add_not_project_estimate` | **仅**登记非项目任务工时 | `task_id` + `consumed` + `remark`；可选 `date`、`user_name` |
 
 ### 对话示例
 
@@ -643,6 +692,10 @@ python3 scripts/api_client.py get_not_project_list
 python3 scripts/api_client.py get_not_project_work_hours \
   --param not_project_name 内部运营 --param start_date 2026-08-01 --param end_date 2026-08-31
 python3 scripts/api_client.py get_not_project_demand_list --param not_project_name 内部运营
+
+# 填报非项目任务工时（预览→确认）
+python3 scripts/api_client.py add_not_project_estimate \
+  --param task_id 1001 --param consumed 2 --param remark 内部培训
 ```
 
 ### 外包 / 供应商

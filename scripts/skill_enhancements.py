@@ -292,8 +292,12 @@ _WARNING_AGENT_HINTS: dict[str, str] = {
     "confirm_type": "请确认是「项目工时」还是「非项目工时」",
     "remark": "请向用户索取备注说明",
     "consumed": "请向用户确认花费工时数",
-    "task_id": "请提供任务 ID（可先 get_task_list 查询）",
-    "project_id": "请提供项目（project_name / sj_num）",
+    "task_id": (
+        "请先确认任务类型：项目任务用 get_task_list → add_project_task_estimate；"
+        "非项目任务用 get_not_project_list / get_not_project_demand_list → add_not_project_estimate。"
+        "禁止把非项目任务写到项目工时接口"
+    ),
+    "project_id": "请提供项目（project_name / sj_num）；若是非项目请改用 not_project_name",
     "date": "请确认日期（默认今天）",
     "rows": "项目价值需提交 rows JSON（可先 get_project_overview_value 查看现有内容）",
 }
