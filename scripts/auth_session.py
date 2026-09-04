@@ -66,8 +66,14 @@ class AuthRequired(Exception):
             "detail": self.detail,
             "login_url": self.login_url,
             "redirect_uri": self.redirect_uri,
-            "message": "请把 login_url 发给用户完成 51PM 登录",
-            "next_step": "用户登录后，重试同一条业务命令",
+            "message": (
+                "请打开 51PM：已登录则打开首页即可同步 Token；"
+                "未登录请点 login_url 完成 OAuth（授权/同意后回到 51PM）"
+            ),
+            "next_step": (
+                "用户打开 51PM 首页（或 login_url）完成后，重试同一条业务命令；"
+                "若仍失败可能是飞书账号未绑定 51PM"
+            ),
         }
 
 

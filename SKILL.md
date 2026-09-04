@@ -29,8 +29,20 @@ Skill（每次业务）
 |------|-----------|
 | 1 | `identity_required` 时：引导智能体执行 `auth save-identity`（**不是**调 lark-cli） |
 | 2 | 身份已保存后：**直接执行业务 CLI** |
-| 3 | `auth_required` → 发 `login_url`，用户登录后重试 |
+| 3 | `auth_required` → 引导用户打开 51PM（见下「手机/已登录」），完成后重试 |
 | 4 | **`permission_denied` → 立即终止**（见下节，禁止继续尝试） |
+
+### 手机 / 已登录用户拿不到 Token
+
+Skill 换票依赖服务端按飞书 `union_id` 缓存的 Token。用户**已在 51PM 登录**时，打开一次 51PM 首页即可触发同步，**不必**重新完整 OAuth（部署了 skill_auth/sync 之后）。
+
+| 场景 | Agent 动作 |
+|------|-----------|
+| 用户说「我已经登录了」/ 手机上已在 51PM | 发 `login_url` **或** 直接给 `http://51pm.51aes.com:771`（移动端亦可），请用户打开并等到首页出现后，再重试业务命令 |
+| 从未登录 / 会话失效 | 必须点 `login_url`（OAuth），登录后如出现「授权/同意」要点掉，回到 51PM 后再重试 |
+| 打开后仍无 Token | 说明可能未绑定飞书账号（无 `feishu_union_id`），告知用户联系管理员同步飞书绑定；**禁止**让用户反复乱点 |
+
+**禁止**只告诉用户「去登录官网」却不说明：直接刷首页若已登录也可同步；以及失败时可能是飞书未绑定。
 
 ### permission_denied = 立即终止（禁止继续思考）
 
@@ -68,7 +80,7 @@ CLI 返回 `"error": "permission_denied"` 且 `"terminal": true` 时：
 | 报错 | 含义 | 动作 |
 |------|------|------|
 | `identity_required` | 未 save-identity | 智能体先 save-identity，再重试业务 |
-| `auth_required` | 未登录 51PM / Token 失效 | 发 login_url，登录后重试。**若同一会话里工时/项目/递交已能查通，禁止再说「某某接口单独要登录」**——多为解析子请求未带 Token（已修）或该接口业务错误被误读 |
+| `auth_required` | 未登录 51PM / Token 缓存未写入 | 引导打开 51PM（已登录打开首页即可同步；未登录用 `login_url`）。同会话其它业务已通时禁止说「某某接口单独要登录」 |
 | `resolve_failed` | 昵称未找到 | 先 `search_user` 确认昵称 |
 | `duplicate_estimate` | 该任务已有工时 | **改走 update**（`existing_estimate_id`），禁止再 add |
 
@@ -89,7 +101,7 @@ python3 scripts/api_client.py auth --param action save-identity --param union_id
 # 业务命令（自动读身份 + 查 token）
 python3 scripts/api_client.py get_task_list --param assignee_name 张三 ...
 
-# 若 auth_required → 发 login_url → 用户登录后重试
+# 若 auth_required → 打开 51PM（已登录即可）或 login_url → 重试
 ```
 
 ### 缺参数 → 问用户，不要猜
@@ -117,7 +129,12 @@ python3 scripts/api_client.py get_publish_list \
 
 ### 登录失效 → auth_required
 
-把 `login_url` 发给用户，登录后**重试原业务命令**（不要执行 auth 子命令）。
+1. 把 `login_url`（或 51PM 首页）发给用户  
+2. **已登录**：打开 51PM 等到首页即可（会同步 Token 缓存）  
+3. **未登录**：走 OAuth，点授权/同意后再回 51PM  
+4. 用户确认后**重试原业务命令**（不要执行 auth 子命令）
+
+若仍失败：可能是飞书账号未绑定 51PM，不要无限重试登录链接。
 
 使用 CLI：
 
@@ -207,7 +224,7 @@ python3 scripts/api_client.py get_dept_members --param my_team_scope 1
 | CLI 返回 | 含义 | Agent 动作 |
 |----------|------|------------|
 | 成功 JSON | 名册已拉到 | 用成员列表核对未填报人员 |
-| `auth_required` | 整站未登录 | 发 `login_url`，登录后重试 |
+| `auth_required` | 整站未登录 / Token 未同步 | 引导打开 51PM（已登录打开首页即可）；未登录用 `login_url` |
 | `permission_denied` | 本地权限拒绝（本接口已无部门范围限制，少见） | 按 terminal 终止 |
 | `resolve_failed` | 部门名错误等 | 先 `get_department_list` 确认部门名 |
 | 空列表 `data: []` | 接口成功但该部门无成员/参数有误 | **如实说明**，不要编造登录问题 |
@@ -236,7 +253,7 @@ python3 scripts/api_client.py get_task_list --param start_date 2026-09-01
 | 返回 | 处理 |
 |------|------|
 | `identity_required` | 智能体先 `auth save-identity`，再重试业务 |
-| `auth_required` | 发 `login_url` → 用户登录 → 重试原命令 |
+| `auth_required` | 发 `login_url` 或打开 51PM 首页 → 同步后重试原命令 |
 | `need_input` | 按 `form` 向用户提问后重试 |
 
 **注意**：`auth save-identity` 必须带 `--param union_id`，且会**先于**业务鉴权执行；不要用 Python 直接写身份文件绕过 CLI。
